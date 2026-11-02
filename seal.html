@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Wert verschlüsseln</title>
+<style>
+  :root { --bg: #ffffff; --fg: #1b1b1f; --muted: #5f6368; --line: #c9ccd1; --accent: #1a73e8; --ok: #137333; --bad: #b3261e; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #17181c; --fg: #ececf0; --muted: #a0a4ab; --line: #3a3d44; --accent: #8ab4f8; --ok: #81c995; --bad: #f28b82; } }
+  body { margin: 0; padding: 16px; background: var(--bg); color: var(--fg); font: 16px/1.45 system-ui, sans-serif; max-width: 34rem; }
+  h1 { font-size: 1.2rem; margin: 0 0 4px; }
+  p { margin: 8px 0; color: var(--muted); }
+  code { color: var(--fg); }
+  input, textarea, button { font: inherit; width: 100%; box-sizing: border-box; padding: 10px; margin: 6px 0; border: 1px solid var(--line); border-radius: 8px; background: var(--bg); color: var(--fg); }
+  button { background: var(--accent); color: var(--bg); border: 0; font-weight: 600; }
+  #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
+  textarea { height: 7rem; word-break: break-all; }
+</style>
+</head>
+<body>
+<h1>Wert verschlüsseln</h1>
+<p>Name: <code id="name">-</code> · Schlüssel-Fingerabdruck: <code id="fingerprint">-</code></p>
+<p>Vergleiche den Fingerabdruck mit dem in der Nachricht des Bots. Der Wert wird in diesem Browser verschlüsselt und verlässt ihn nur verschlüsselt.</p>
+<input id="value" type="password" autocomplete="off" placeholder="Wert">
+<button id="send">Verschlüsseln</button>
+<p id="status"></p>
+<textarea id="result" readonly hidden></textarea>
+<button id="copy" hidden>Kopieren</button>
+<script id="config" type="application/json"></script>
+<script>
+// <seal>
+function toBase64Url(bytes) {
+  return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+function fromBase64Url(text) {
+  return Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (character) => character.charCodeAt(0));
+}
+// The first four bytes of the SHA-256 of the public key as "xxxx-xxxx"; the bot names the same one in its message.
+async function fingerprint(publicKey) {
+  const hash = new Uint8Array(await crypto.subtle.digest("SHA-256", fromBase64Url(publicKey)));
+  const hex = Array.from(hash.slice(0, 4), (byte) => byte.toString(16).padStart(2, "0")).join("");
+  return hex.slice(0, 4) + "-" + hex.slice(4);
+}
+// Layout of the result: RSA-OAEP(SHA-256) wrapped AES key | 12 byte IV | AES-GCM(JSON {n: name, v: value, t: time}); base64url.
+async function seal(publicKey, name, value, now) {
+  const rsa = await crypto.subtle.importKey("spki", fromBase64Url(publicKey), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
+  const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
+  const iv = crypto.getRandomValues(new Uint8Array(12));
+  const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aes, new TextEncoder().encode(JSON.stringify({ n: name, v: value, t: now }))));
+  const wrapped = new Uint8Array(await crypto.subtle.encrypt({ name: "RSA-OAEP" }, rsa, await crypto.subtle.exportKey("raw", aes)));
+  const all = new Uint8Array(wrapped.length + iv.length + body.length);
+  all.set(wrapped, 0);
+  all.set(iv, wrapped.length);
+  all.set(body, wrapped.length + iv.length);
+  return toBase64Url(all);
+}
+// </seal>
+
+// The name and the public key come with the link (?n=NAME&k=KEY) or, in the file the bot sends, from the config element below.
+const config = (() => {
+  const query = new URLSearchParams(location.search);
+  const embedded = document.getElementById("config");
+  const file = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : {};
+  return { name: query.get("n") || file.n || "", key: query.get("k") || file.k || "" };
+})();
+const element = (id) => document.getElementById(id);
+const say = (text, kind) => { element("status").textContent = text; element("status").className = kind || ""; };
+element("name").textContent = config.name || "-";
+if (config.key) fingerprint(config.key).then((value) => { element("fingerprint").textContent = value; }, () => say("Der Schlüssel im Link ist ungültig.", "bad"));
+else say("Der Link enthält keinen Schlüssel: öffne ihn noch einmal aus der Nachricht des Bots.", "bad");
+
+// Inside Telegram (a Mini App) the result goes straight to the bot; the Telegram script is loaded only there.
+const inTelegram = location.hash.includes("tgWebApp");
+if (inTelegram) {
+  const script = document.createElement("script");
+  script.src = "https://telegram.org/js/telegram-web-app.js";
+  script.onload = () => window.Telegram.WebApp.ready();
+  document.head.appendChild(script);
+}
+element("send").addEventListener("click", async () => {
+  const value = element("value").value;
+  if (!config.name || !config.key || !value) return say("Name, Schlüssel und Wert werden gebraucht.", "bad");
+  try {
+    const sealed = await seal(config.key, config.name, value, Date.now());
+    element("value").value = "";
+    if (inTelegram && window.Telegram && window.Telegram.WebApp) {
+      window.Telegram.WebApp.sendData(JSON.stringify({ n: config.name, c: sealed }));
+      return say("Gesendet.", "ok");
+    }
+    element("result").value = "/setenv " + config.name + " enc:" + sealed;
+    element("result").hidden = false;
+    element("copy").hidden = false;
+    say("Kopiere den Text und sende ihn an den Bot.", "ok");
+  } catch (error) {
+    say("Verschlüsseln fehlgeschlagen: " + error.message, "bad");
+  }
+});
+element("copy").addEventListener("click", async () => {
+  element("result").select();
+  try { await navigator.clipboard.writeText(element("result").value); say("Kopiert.", "ok"); } catch { document.execCommand("copy"); say("Kopiert.", "ok"); }
+});
+</script>
+</body>
+</html>
