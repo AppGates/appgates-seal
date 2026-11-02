@@ -21,6 +21,7 @@
 <h1>Wert verschlüsseln</h1>
 <p>Name: <code id="name">-</code> · Schlüssel-Fingerabdruck: <code id="fingerprint">-</code></p>
 <p>Vergleiche den Fingerabdruck mit dem in der Nachricht des Bots. Der Wert wird in diesem Browser verschlüsselt und verlässt ihn nur verschlüsselt.</p>
+<input id="nameInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Name, z. B. MAIL_PASSWORD" hidden>
 <input id="value" type="password" autocomplete="off" placeholder="Wert">
 <button id="send">Verschlüsseln</button>
 <p id="status"></p>
@@ -31,6 +32,11 @@
 // <seal>
 function toBase64Url(bytes) {
   return btoa(String.fromCharCode(...bytes)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+// A name as the bot wants it: upper case letters, digits and "_", starting with a letter ("mail-pw" gives "MAIL_PW"); empty when nothing is left.
+function normalizeName(text) {
+  const name = String(text).trim().toUpperCase().replace(/[^A-Z0-9_]+/g, "_").replace(/^_+|_+$/g, "");
+  return /^[A-Z][A-Z0-9_]{1,63}$/.test(name) ? name : "";
 }
 function fromBase64Url(text) {
   return Uint8Array.from(atob(text.replace(/-/g, "+").replace(/_/g, "/")), (character) => character.charCodeAt(0));
@@ -61,11 +67,13 @@ const config = (() => {
   const query = new URLSearchParams(location.search);
   const embedded = document.getElementById("config");
   const file = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : {};
-  return { name: query.get("n") || file.n || "", key: query.get("k") || file.k || "" };
+  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "" };
 })();
 const element = (id) => document.getElementById(id);
 const say = (text, kind) => { element("status").textContent = text; element("status").className = kind || ""; };
 element("name").textContent = config.name || "-";
+// without a name in the link the person types it here
+if (!config.name) element("nameInput").hidden = false;
 if (config.key) fingerprint(config.key).then((value) => { element("fingerprint").textContent = value; }, () => say("Der Schlüssel im Link ist ungültig.", "bad"));
 else say("Der Link enthält keinen Schlüssel: öffne ihn noch einmal aus der Nachricht des Bots.", "bad");
 
@@ -79,15 +87,17 @@ if (inTelegram) {
 }
 element("send").addEventListener("click", async () => {
   const value = element("value").value;
-  if (!config.name || !config.key || !value) return say("Name, Schlüssel und Wert werden gebraucht.", "bad");
+  const name = config.name || normalizeName(element("nameInput").value);
+  if (!name || !config.key || !value) return say("Name (Buchstaben, Ziffern, _), Schlüssel und Wert werden gebraucht.", "bad");
+  element("name").textContent = name;
   try {
-    const sealed = await seal(config.key, config.name, value, Date.now());
+    const sealed = await seal(config.key, name, value, Date.now());
     element("value").value = "";
     if (inTelegram && window.Telegram && window.Telegram.WebApp) {
-      window.Telegram.WebApp.sendData(JSON.stringify({ n: config.name, c: sealed }));
+      window.Telegram.WebApp.sendData(JSON.stringify({ n: name, c: sealed }));
       return say("Gesendet.", "ok");
     }
-    element("result").value = "/setenv " + config.name + " enc:" + sealed;
+    element("result").value = "/setenv " + name + " enc:" + sealed;
     element("result").hidden = false;
     element("copy").hidden = false;
     say("Kopiere den Text und sende ihn an den Bot.", "ok");
