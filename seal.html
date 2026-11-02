@@ -19,6 +19,7 @@
 </head>
 <body>
 <h1>Wert verschlüsseln</h1>
+<p id="purpose" hidden></p>
 <p>Name: <code id="name">-</code> · Schlüssel-Fingerabdruck: <code id="fingerprint">-</code></p>
 <p>Vergleiche den Fingerabdruck mit dem in der Nachricht des Bots. Der Wert wird in diesem Browser verschlüsselt und verlässt ihn nur verschlüsselt.</p>
 <input id="nameInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Name, z. B. MAIL_PASSWORD" hidden>
@@ -67,11 +68,16 @@ const config = (() => {
   const query = new URLSearchParams(location.search);
   const embedded = document.getElementById("config");
   const file = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : {};
-  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "" };
+  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "", request: query.get("r") || "", purpose: query.get("p") || "" };
 })();
 const element = (id) => document.getElementById(id);
 const say = (text, kind) => { element("status").textContent = text; element("status").className = kind || ""; };
 element("name").textContent = config.name || "-";
+// a request of a script says what it is for (as text, never as markup)
+if (config.purpose) {
+  element("purpose").textContent = "Wofür: " + config.purpose;
+  element("purpose").hidden = false;
+}
 // without a name in the link the person types it here
 if (!config.name) element("nameInput").hidden = false;
 if (config.key) fingerprint(config.key).then((value) => { element("fingerprint").textContent = value; }, () => say("Der Schlüssel im Link ist ungültig.", "bad"));
@@ -94,7 +100,7 @@ element("send").addEventListener("click", async () => {
     const sealed = await seal(config.key, name, value, Date.now());
     element("value").value = "";
     if (inTelegram && window.Telegram && window.Telegram.WebApp) {
-      window.Telegram.WebApp.sendData(JSON.stringify({ n: name, c: sealed }));
+      window.Telegram.WebApp.sendData(JSON.stringify(config.request ? { n: name, r: config.request, c: sealed } : { n: name, c: sealed }));
       return say("Gesendet.", "ok");
     }
     element("result").value = "/setenv " + name + " enc:" + sealed;
