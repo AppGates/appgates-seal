@@ -15,6 +15,10 @@
   button { background: var(--accent); color: var(--bg); border: 0; font-weight: 600; }
   #status.ok { color: var(--ok); } #status.bad { color: var(--bad); }
   textarea { height: 7rem; word-break: break-all; }
+  fieldset { border: 1px solid var(--line); border-radius: 8px; margin: 8px 0; padding: 4px 12px 8px; }
+  legend { color: var(--muted); padding: 0 4px; }
+  label { display: block; margin: 6px 0; }
+  input[type=radio] { width: auto; margin: 0 8px 0 0; }
 </style>
 </head>
 <body>
@@ -24,6 +28,13 @@
 <p>Vergleiche den Fingerabdruck mit dem in der Nachricht des Bots. Der Wert wird in diesem Browser verschlüsselt und verlässt ihn nur verschlüsselt.</p>
 <input id="nameInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Name, z. B. MAIL_PASSWORD" hidden>
 <input id="value" type="password" autocomplete="off" placeholder="Wert">
+<input id="hint" type="text" autocomplete="off" placeholder="Hinweis (freiwillig, nie der Wert selbst)" hidden>
+<fieldset id="places" hidden>
+  <legend>Wo darf der Wert bleiben?</legend>
+  <label><input type="radio" name="place" value="run" checked>Nur für diesen Lauf</label>
+  <label id="placeSession" hidden><input type="radio" name="place" value="session">Für die Sitzung (bis zum Abmelden)</label>
+  <label id="placePermanent" hidden><input type="radio" name="place" value="permanent">Dauerhaft</label>
+</fieldset>
 <button id="send">Verschlüsseln</button>
 <p id="status"></p>
 <textarea id="result" readonly hidden></textarea>
@@ -48,12 +59,36 @@ async function fingerprint(publicKey) {
   const hex = Array.from(hash.slice(0, 4), (byte) => byte.toString(16).padStart(2, "0")).join("");
   return hex.slice(0, 4) + "-" + hex.slice(4);
 }
-// Layout of the result: RSA-OAEP(SHA-256) wrapped AES key | 12 byte IV | AES-GCM(JSON {n: name, v: value, t: time}); base64url.
-async function seal(publicKey, name, value, now) {
+// The places a request offers, from the address (`o=session,permanent`): only the two known ones get through, each once.
+function offeredPlaces(text) {
+  return String(text || "").split(",").map((place) => place.trim()).filter((place, index, all) => (place === "session" || place === "permanent") && all.indexOf(place) === index);
+}
+// What is sealed besides name, value and time: the hint (when one was typed) and the place (when it is not "run"; no place means "run").
+function extraOf(hint, place) {
+  const extra = {};
+  if (hint) extra.h = hint;
+  if (place && place !== "run") extra.k = place;
+  return extra;
+}
+// A hint that gives the value away is no hint.
+function hintProblem(hint, value) {
+  return hint && hint === value ? "Der Hinweis darf nicht der Wert sein." : "";
+}
+// What goes back to the bot with sendData: only the number of the request stays open (it says nothing, the bot finds its request by it); name, value, hint and
+// place are all inside the sealed text.
+function answerOf(request, sealed) {
+  return JSON.stringify(request ? { r: request, c: sealed } : { c: sealed });
+}
+// Telegram takes 4096 bytes at most through sendData.
+function fitsTelegram(text) {
+  return new TextEncoder().encode(text).length <= 4096;
+}
+// Layout of the result: RSA-OAEP(SHA-256) wrapped AES key | 12 byte IV | AES-GCM(JSON {n: name, v: value, t: time, h?: hint, k?: place}); base64url.
+async function seal(publicKey, name, value, now, extra) {
   const rsa = await crypto.subtle.importKey("spki", fromBase64Url(publicKey), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
   const aes = await crypto.subtle.generateKey({ name: "AES-GCM", length: 256 }, true, ["encrypt"]);
   const iv = crypto.getRandomValues(new Uint8Array(12));
-  const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aes, new TextEncoder().encode(JSON.stringify({ n: name, v: value, t: now }))));
+  const body = new Uint8Array(await crypto.subtle.encrypt({ name: "AES-GCM", iv }, aes, new TextEncoder().encode(JSON.stringify({ n: name, v: value, t: now, ...(extra || {}) }))));
   const wrapped = new Uint8Array(await crypto.subtle.encrypt({ name: "RSA-OAEP" }, rsa, await crypto.subtle.exportKey("raw", aes)));
   const all = new Uint8Array(wrapped.length + iv.length + body.length);
   all.set(wrapped, 0);
@@ -68,7 +103,7 @@ const config = (() => {
   const query = new URLSearchParams(location.search);
   const embedded = document.getElementById("config");
   const file = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : {};
-  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "", request: query.get("r") || "", purpose: query.get("p") || "" };
+  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "", request: query.get("r") || "", purpose: query.get("p") || "", places: offeredPlaces(query.get("o")) };
 })();
 const element = (id) => document.getElementById(id);
 const say = (text, kind) => { element("status").textContent = text; element("status").className = kind || ""; };
@@ -80,6 +115,12 @@ if (config.purpose) {
 }
 // without a name in the link the person types it here
 if (!config.name) element("nameInput").hidden = false;
+// a request that offers places shows exactly those (the program decides what may be offered), with "only for this run" as the default, and the hint field
+if (config.places.length > 0) {
+  element("places").hidden = false;
+  element("hint").hidden = false;
+  for (const place of config.places) element(place === "session" ? "placeSession" : "placePermanent").hidden = false;
+}
 if (config.key) fingerprint(config.key).then((value) => { element("fingerprint").textContent = value; }, () => say("Der Schlüssel im Link ist ungültig.", "bad"));
 else say("Der Link enthält keinen Schlüssel: öffne ihn noch einmal aus der Nachricht des Bots.", "bad");
 
@@ -96,13 +137,24 @@ element("send").addEventListener("click", async () => {
   const name = config.name || normalizeName(element("nameInput").value);
   if (!name || !config.key || !value) return say("Name (Buchstaben, Ziffern, _), Schlüssel und Wert werden gebraucht.", "bad");
   element("name").textContent = name;
+  // the place the owner chose has to be one the request offered (the bot checks it again: what the program offered is authoritative)
+  const chosen = document.querySelector('input[name="place"]:checked');
+  const place = chosen ? chosen.value : "run";
+  if (place !== "run" && !config.places.includes(place)) return say("Dieser Ort wurde nicht angeboten.", "bad");
+  const hint = element("hint").value.trim();
+  const problem = hintProblem(hint, value);
+  if (problem) return say(problem, "bad");
   try {
-    const sealed = await seal(config.key, name, value, Date.now());
-    element("value").value = "";
+    const sealed = await seal(config.key, name, value, Date.now(), extraOf(hint, place));
     if (inTelegram && window.Telegram && window.Telegram.WebApp) {
-      window.Telegram.WebApp.sendData(JSON.stringify(config.request ? { n: name, r: config.request, c: sealed } : { n: name, c: sealed }));
+      const data = answerOf(config.request, sealed);
+      if (!fitsTelegram(data)) return say("Zu lang für Telegram (höchstens 4096 Bytes): kürze den Wert oder den Hinweis.", "bad");
+      element("value").value = "";
+      element("hint").value = "";
+      window.Telegram.WebApp.sendData(data);
       return say("Gesendet.", "ok");
     }
+    element("value").value = "";
     element("result").value = "/setenv " + name + " enc:" + sealed;
     element("result").hidden = false;
     element("copy").hidden = false;
