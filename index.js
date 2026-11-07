@@ -2847,6 +2847,21 @@ class WebViewModel {
   isEnabled = true;
   isVisible = true;
 }
+
+// ../../frontend/web/packages/ui/src/viewModels/ActionBarViewModel.ts
+class ActionBarViewModel extends WebViewModel {
+  actions = [];
+}
+// ../../frontend/web/packages/ui/src/viewModels/AppBarViewModel.ts
+class AppBarViewModel extends WebViewModel {
+  brand = undefined;
+  brandCaption = undefined;
+  title = "";
+  subtitle = undefined;
+  back = undefined;
+  counterText = undefined;
+  actions = [];
+}
 // ../../frontend/web/packages/ui/src/viewModels/ButtonViewModel.ts
 class ButtonViewModel extends WebViewModel {
   _command;
@@ -2867,6 +2882,31 @@ class ButtonViewModel extends WebViewModel {
     if (!this.isEnabled)
       return;
     await this._command();
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ConfirmSheetViewModel.ts
+class ConfirmSheetViewModel extends WebViewModel {
+  isOpen = false;
+  title = "";
+  text = "";
+  confirm;
+  cancel;
+  constructor(onConfirm, onCancel = () => {}) {
+    super();
+    this.confirm = new ButtonViewModel(async () => {
+      this.close();
+      await onConfirm();
+    }, { variant: "primary" });
+    this.cancel = new ButtonViewModel(async () => {
+      this.close();
+      await onCancel();
+    });
+  }
+  open() {
+    this.isOpen = true;
+  }
+  close() {
+    this.isOpen = false;
   }
 }
 // ../../frontend/web/packages/ui/src/viewModels/DropdownFieldViewModel.ts
@@ -2978,7 +3018,7 @@ class DynamicFormModelApi {
         for (const row of field.rows)
           rows[row.id] = DynamicFormModelApi.leafValues(row.fields);
         values[field.id] = rows;
-      } else {
+      } else if (field.kind !== "info") {
         values[field.id] = DynamicFormModelApi.leafValue(field);
       }
     }
@@ -3023,11 +3063,15 @@ class DynamicFormModelApi {
   }
   static leafValues(fields) {
     const values = {};
-    for (const field of fields)
-      values[field.id] = DynamicFormModelApi.leafValue(field);
+    for (const field of fields) {
+      if (field.kind !== "info")
+        values[field.id] = DynamicFormModelApi.leafValue(field);
+    }
     return values;
   }
   static checkLeaf(field, value, where) {
+    if (field.kind === "info")
+      throw new Error(`${where}: "${field.id}" is a read-only line, a delta cannot name it.`);
     if (field.kind === "switch") {
       if (typeof value !== "boolean")
         throw new Error(`${where}: the switch "${field.id}" takes true or false, got ${DynamicFormModelApi.describe(value)}.`);
@@ -3068,6 +3112,9 @@ class DynamicFormModelApi {
         throw new Error(`${where}.value: a text field takes a text, got ${DynamicFormModelApi.describe(field.value)}.`);
       if (typeof field.value === "string" && typeof max === "number" && field.value.length > max)
         throw new Error(`${where}.value: the prefilled text is longer than maxLength ${max}.`);
+    } else if (kind === "info") {
+      if (typeof field.value !== "string")
+        throw new Error(`${where}.value: an info line needs the text that is shown, got ${DynamicFormModelApi.describe(field.value)}.`);
     } else if (kind === "rows") {
       if (!allowRows)
         throw new Error(`${where}.kind: rows cannot be inside a row.`);
@@ -3084,7 +3131,7 @@ class DynamicFormModelApi {
         DynamicFormModelApi.list(row.fields, `${rowWhere}.fields`).forEach((leaf, leafIndex) => DynamicFormModelApi.validateField(leaf, `${rowWhere}.fields[${leafIndex}]`, leafIds, false));
       });
     } else {
-      throw new Error(`${where}.kind: expected dropdown, switch, text or rows, got ${DynamicFormModelApi.describe(kind)}.`);
+      throw new Error(`${where}.kind: expected dropdown, switch, text, info or rows, got ${DynamicFormModelApi.describe(kind)}.`);
     }
   }
   static record(value, where) {
@@ -3112,6 +3159,17 @@ class DynamicFormModelApi {
     return value === undefined ? "nothing" : JSON.stringify(value)?.slice(0, 60) ?? String(value);
   }
 }
+// ../../frontend/web/packages/ui/src/viewModels/InfoFieldViewModel.ts
+class InfoFieldViewModel extends WebViewModel {
+  key = "";
+  labelText = "";
+  valueText = "";
+  constructor(init = {}) {
+    super();
+    Object.assign(this, init);
+  }
+}
+
 // ../../frontend/web/packages/ui/src/viewModels/SwitchFieldViewModel.ts
 class SwitchFieldViewModel extends WebViewModel {
   _onChange;
@@ -3191,10 +3249,12 @@ class DynamicFormViewModel extends WebViewModel {
   currentValues() {
     const values = {};
     for (const item of this.items) {
-      if (item.kind === "field")
-        values[item.field.key] = item.field.value;
-      else
-        values[item.id] = Object.fromEntries(item.rows.map((row) => [row.id, Object.fromEntries(row.fields.map((field) => [field.key, field.value]))]));
+      if (item.kind === "field") {
+        if (!(item.field instanceof InfoFieldViewModel))
+          values[item.field.key] = item.field.value;
+      } else {
+        values[item.id] = Object.fromEntries(item.rows.map((row) => [row.id, Object.fromEntries(row.fields.flatMap((field) => field instanceof InfoFieldViewModel ? [] : [[field.key, field.value]]))]));
+      }
     }
     return values;
   }
@@ -3219,6 +3279,8 @@ class DynamicFormViewModel extends WebViewModel {
   }
   _leaf(field, value) {
     const changed = () => this._refresh();
+    if (field.kind === "info")
+      return new InfoFieldViewModel({ key: field.id, labelText: field.label, valueText: field.value });
     if (field.kind === "dropdown")
       return new DropdownFieldViewModel({ key: field.id, labelText: field.label, options: field.options, value }, changed);
     if (field.kind === "switch")
@@ -3247,6 +3309,660 @@ class DynamicFormViewModel extends WebViewModel {
     this._isSubmitting = false;
   }
 }
+// ../../frontend/web/packages/ui/src/viewModels/FormSheetViewModel.ts
+class FormRemoveViewModel {
+  text = "";
+  button;
+  confirm;
+  cancel;
+  constructor(button, confirm, cancel) {
+    this.button = button;
+    this.confirm = confirm;
+    this.cancel = cancel;
+  }
+}
+
+class FormSheetViewModel extends WebViewModel {
+  _onSubmit;
+  isOpen = false;
+  title = "";
+  errorText = "";
+  describeError = (error) => error instanceof Error ? error.message : String(error);
+  isConfirmingRemove = false;
+  fields = [];
+  confirm;
+  cancel;
+  remove = undefined;
+  constructor(_onSubmit, onCancel = () => {}) {
+    super();
+    this._onSubmit = _onSubmit;
+    this.confirm = new ButtonViewModel(() => this._submit(), { variant: "primary" });
+    this.cancel = new ButtonViewModel(async () => {
+      this.close();
+      await onCancel();
+    });
+    this.confirm.isEnabled = false;
+  }
+  get isValid() {
+    return this.fields.every((field) => !field.isRequired || field.value.trim() !== "");
+  }
+  open(values = {}) {
+    for (const field of this.fields)
+      field.value = values[field.key] ?? "";
+    this.isConfirmingRemove = false;
+    this.refresh();
+    this.isOpen = true;
+  }
+  close() {
+    this.isOpen = false;
+  }
+  refresh() {
+    this.confirm.isEnabled = this.isValid;
+    this.errorText = "";
+  }
+  addField(init) {
+    const field = new TextFieldViewModel(init, () => this.refresh());
+    this.fields.push(field);
+    return field;
+  }
+  addRemove(run) {
+    const button = new ButtonViewModel(() => void (this.isConfirmingRemove = true), { variant: "link-danger" });
+    const confirm = new ButtonViewModel(async () => {
+      this.close();
+      await run();
+    }, { variant: "danger" });
+    const cancel = new ButtonViewModel(() => void (this.isConfirmingRemove = false));
+    this.remove = new FormRemoveViewModel(button, confirm, cancel);
+    return this.remove;
+  }
+  async _submit() {
+    if (!this.isValid)
+      return;
+    const values = Object.fromEntries(this.fields.map((field) => [field.key, field.value.trim()]));
+    this.close();
+    try {
+      await this._onSubmit(values);
+    } catch (error) {
+      this.errorText = this.describeError(error);
+      this.isOpen = true;
+    }
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/FilePickerViewModel.ts
+class FilePickerViewModel extends WebViewModel {
+  _onPick;
+  text = "";
+  icon = undefined;
+  accept = "";
+  isMultiple = false;
+  isBusy = false;
+  constructor(_onPick, init = {}) {
+    super();
+    this._onPick = _onPick;
+    Object.assign(this, init);
+  }
+  async pick(files) {
+    if (files.length === 0 || !this.isEnabled || this.isBusy)
+      return;
+    await this._onPick(files);
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/HintViewModel.ts
+class HintViewModel extends WebViewModel {
+  text = "";
+  tone = "default";
+  constructor(text = "") {
+    super();
+    this.text = text;
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ImageViewModel.ts
+class ImageViewModel extends WebViewModel {
+  _load;
+  key;
+  emptyIcon = "camera";
+  constructor(_load, key = undefined) {
+    super();
+    this._load = _load;
+    this.key = key;
+  }
+  get hasImage() {
+    return this.key !== undefined;
+  }
+  async image() {
+    return await this._load();
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/PictureViewerViewModel.ts
+class PictureViewerViewModel extends WebViewModel {
+  static minScale = 1;
+  static maxScale = 4;
+  static step = 1.5;
+  static doubleTapScale = 2.5;
+  isOpen = false;
+  scale = 1;
+  closeButton;
+  zoomInButton;
+  zoomOutButton;
+  constructor() {
+    super();
+    this.closeButton = new ButtonViewModel(() => this.close(), { variant: "icon", icon: "close" });
+    this.zoomInButton = new ButtonViewModel(() => this.zoomIn(), { variant: "icon", icon: "plus" });
+    this.zoomOutButton = new ButtonViewModel(() => this.zoomOut(), { variant: "icon", icon: "minus" });
+    this._syncButtons();
+  }
+  open() {
+    this.scale = 1;
+    this.isOpen = true;
+    this._syncButtons();
+  }
+  close() {
+    this.isOpen = false;
+    this.scale = 1;
+    this._syncButtons();
+  }
+  zoomIn() {
+    this.setScale(this.scale * PictureViewerViewModel.step);
+  }
+  zoomOut() {
+    this.setScale(this.scale / PictureViewerViewModel.step);
+  }
+  toggleZoom() {
+    this.setScale(this.scale > PictureViewerViewModel.minScale ? PictureViewerViewModel.minScale : PictureViewerViewModel.doubleTapScale);
+  }
+  pinch(startScale, startDistance, distance) {
+    if (startDistance <= 0 || distance <= 0)
+      return;
+    this.setScale(startScale * (distance / startDistance));
+  }
+  setScale(scale) {
+    this.scale = Math.min(PictureViewerViewModel.maxScale, Math.max(PictureViewerViewModel.minScale, scale));
+    this._syncButtons();
+  }
+  _syncButtons() {
+    this.zoomOutButton.isEnabled = this.scale > PictureViewerViewModel.minScale;
+    this.zoomInButton.isEnabled = this.scale < PictureViewerViewModel.maxScale;
+  }
+}
+
+// ../../frontend/web/packages/ui/src/viewModels/PictureViewModel.ts
+class PictureViewModel extends WebViewModel {
+  _options;
+  canEdit = true;
+  texts = { chooseText: "", busyText: "", openTooltipText: "", editTooltipText: "", removeTooltipText: "", closeTooltipText: "", zoomInTooltipText: "", zoomOutTooltipText: "" };
+  image;
+  picker;
+  removeButton;
+  viewer = new PictureViewerViewModel;
+  constructor(load, _options = {}) {
+    super();
+    this._options = _options;
+    this.image = new ImageViewModel(load, _options.key);
+    this.picker = new FilePickerViewModel(async (files) => void await _options.onPick?.(files[0]), { icon: "edit", accept: _options.accept ?? "image/*" });
+    this.removeButton = new ButtonViewModel(async () => void await _options.onRemove?.(), { variant: "icon-small", icon: "trash" });
+    this.texts = { ...this.texts, ..._options.texts };
+    this.applyTexts();
+  }
+  get key() {
+    return this.image.key;
+  }
+  set key(key) {
+    this.image.key = key;
+    this.applyTexts();
+  }
+  get isBusy() {
+    return this.picker.isBusy;
+  }
+  set isBusy(value) {
+    this.picker.isBusy = value;
+    this.applyTexts();
+  }
+  get hasImage() {
+    return this.image.hasImage;
+  }
+  get canPick() {
+    return this.canEdit && this._options.onPick !== undefined;
+  }
+  get showsActions() {
+    return this.hasImage && this.canEdit;
+  }
+  get canRemove() {
+    return this.showsActions && this._options.onRemove !== undefined;
+  }
+  get isPickTarget() {
+    return !this.hasImage && this.canPick;
+  }
+  open() {
+    if (this.hasImage)
+      this.viewer.open();
+  }
+  applyTexts() {
+    this.picker.text = this.isBusy ? this.texts.busyText : this.hasImage ? this.texts.editTooltipText : this.texts.chooseText;
+    this.removeButton.text = this.texts.removeTooltipText;
+    this.viewer.closeButton.text = this.texts.closeTooltipText;
+    this.viewer.zoomInButton.text = this.texts.zoomInTooltipText;
+    this.viewer.zoomOutButton.text = this.texts.zoomOutTooltipText;
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ListRowViewModel.ts
+class ListRowViewModel extends WebViewModel {
+  _onOpen;
+  title = "";
+  meta = undefined;
+  leading = undefined;
+  trailing = undefined;
+  href = undefined;
+  isSelected = false;
+  constructor(_onOpen = () => {}, init = {}) {
+    super();
+    this._onOpen = _onOpen;
+    Object.assign(this, init);
+  }
+  open() {
+    if (this.isEnabled)
+      this._onOpen();
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ListItemViewModel.ts
+class ListItemViewModel extends WebViewModel {
+  content;
+  key = undefined;
+  controls = undefined;
+  size = undefined;
+  constructor(content, key) {
+    super();
+    this.content = content;
+    this.key = key;
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ListViewModel.ts
+class ListViewModel extends WebViewModel {
+  label = "";
+  reorderToggle;
+  announcement = undefined;
+  draggingId = undefined;
+  dropIndex = undefined;
+  _items = [];
+  _reorder;
+  _reorderable = false;
+  _alwaysEditing = false;
+  _editing = false;
+  _queue = Promise.resolve();
+  constructor() {
+    super();
+    this.reorderToggle = new ButtonViewModel(async () => this.toggleEditing(), { variant: "icon-small", icon: "reorder" });
+    this.reorderToggle.isVisible = false;
+  }
+  get items() {
+    return this._items;
+  }
+  set items(value) {
+    this._items = value;
+    this._refreshReordering();
+  }
+  enableReordering(options) {
+    this._reorder = options;
+    this._refreshReordering();
+  }
+  get reorderable() {
+    return this._reorderable;
+  }
+  set reorderable(value) {
+    this._reorderable = value;
+    this._refreshReordering();
+  }
+  get alwaysEditing() {
+    return this._alwaysEditing;
+  }
+  set alwaysEditing(value) {
+    this._alwaysEditing = value;
+    this._refreshReordering();
+  }
+  get editing() {
+    return this._editing;
+  }
+  set editing(value) {
+    this._editing = value;
+    this._refreshReordering();
+  }
+  get reordering() {
+    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && (this._alwaysEditing || this._editing);
+  }
+  get canToggle() {
+    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && !this._alwaysEditing;
+  }
+  toggleEditing() {
+    if (this.canToggle)
+      this.editing = !this.editing;
+  }
+  canMoveUp(key) {
+    return this.reordering && this.positionOf(key) > 0;
+  }
+  canMoveDown(key) {
+    const index = this.positionOf(key);
+    return this.reordering && index >= 0 && index < this._items.length - 1;
+  }
+  moveUp(key) {
+    return this.canMoveUp(key) ? this.moveTo(key, this.positionOf(key) - 1) : Promise.resolve();
+  }
+  moveDown(key) {
+    return this.canMoveDown(key) ? this.moveTo(key, this.positionOf(key) + 1) : Promise.resolve();
+  }
+  moveTo(key, toIndex) {
+    const options = this._reorder;
+    if (!this.reordering || !options)
+      return Promise.resolve();
+    const from = this.positionOf(key);
+    if (from < 0)
+      return Promise.resolve();
+    const target = Math.min(Math.max(Math.trunc(toIndex), 0), this._items.length - 1);
+    if (target === from)
+      return Promise.resolve();
+    const before = this._items;
+    const next = [...before];
+    const [moved] = next.splice(from, 1);
+    next.splice(target, 0, moved);
+    this.items = next;
+    this.announcement = options.announce(moved, target + 1, next.length);
+    const run = this._queue.then(async () => {
+      try {
+        await options.move(key, target);
+      } catch (error) {
+        this.items = before;
+        options.onError?.(error);
+      }
+    });
+    this._queue = run;
+    return run;
+  }
+  startDrag(key) {
+    if (!this.reordering || this.positionOf(key) < 0)
+      return;
+    this.draggingId = key;
+    this.dropIndex = this.positionOf(key);
+  }
+  dragTo(index) {
+    if (this.draggingId === undefined)
+      return;
+    this.dropIndex = Math.min(Math.max(Math.trunc(index), 0), this._items.length - 1);
+  }
+  async drop() {
+    const key = this.draggingId;
+    const index = this.dropIndex;
+    this.cancelDrag();
+    if (key !== undefined && index !== undefined)
+      await this.moveTo(key, index);
+  }
+  cancelDrag() {
+    this.draggingId = undefined;
+    this.dropIndex = undefined;
+  }
+  positionOf(key) {
+    return this._items.findIndex((item) => item.key === key);
+  }
+  _refreshReordering() {
+    const options = this._reorder;
+    const reordering = this.reordering;
+    this.reorderToggle.isVisible = this.canToggle;
+    if (!reordering) {
+      this.announcement = undefined;
+      this.draggingId = undefined;
+      this.dropIndex = undefined;
+    }
+    for (const item of this._items) {
+      if (!reordering || !options || item.key === undefined) {
+        if (item.controls !== undefined)
+          item.controls = undefined;
+        continue;
+      }
+      const existing = item.controls;
+      const controls = existing !== undefined && existing.itemId === item.key ? existing : options.controlsFor(this, item.key);
+      controls.refresh();
+      if (item.controls !== controls)
+        item.controls = controls;
+    }
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/MasterDetailViewModel.ts
+class MasterDetailViewModel extends WebViewModel {
+  master = undefined;
+  detail = undefined;
+  placeholder = undefined;
+}
+// ../../frontend/web/packages/ui/src/viewModels/ProgressBarViewModel.ts
+class ProgressBarViewModel extends WebViewModel {
+  done = 0;
+  total = 0;
+  label = "";
+  tone = "accent";
+  completeTone = undefined;
+  get percent() {
+    return this.total === 0 ? 0 : Math.round(this.done / this.total * 100);
+  }
+  get isComplete() {
+    return this.total > 0 && this.done >= this.total;
+  }
+  get effectiveTone() {
+    return this.isComplete && this.completeTone ? this.completeTone : this.tone;
+  }
+}
+// ../../shared/typescript/packages/core/src/text/TextMatchApi.ts
+class TextMatchApi {
+  constructor() {}
+  static normalize(text) {
+    return TextMatchApi.fold(text).text;
+  }
+  static matches(text, query) {
+    const words = TextMatchApi.words(query);
+    if (words.length === 0)
+      return true;
+    const compared = TextMatchApi.normalize(text);
+    return words.every((word) => compared.includes(word));
+  }
+  static segments(text, query) {
+    const words = TextMatchApi.words(query);
+    const folded = TextMatchApi.fold(text);
+    const found = TextMatchApi.merge(words.flatMap((word) => TextMatchApi.occurrences(folded.text, word)));
+    const segments = [];
+    let position = 0;
+    for (const [from, to] of found) {
+      const start = folded.origins[from];
+      const end = to < folded.origins.length ? folded.origins[to] : text.length;
+      TextMatchApi.push(segments, text.slice(position, start), false);
+      TextMatchApi.push(segments, text.slice(start, end), true);
+      position = end;
+    }
+    TextMatchApi.push(segments, text.slice(position), false);
+    return segments;
+  }
+  static fold(text) {
+    let compared = "";
+    const origins = [];
+    let offset = 0;
+    for (const character of text) {
+      const piece = character.normalize("NFD").replace(/\p{M}/gu, "").toLowerCase().replace(/ß/g, "ss");
+      for (let index = 0;index < piece.length; index++)
+        origins.push(offset);
+      compared += piece;
+      offset += character.length;
+    }
+    return { text: compared, origins };
+  }
+  static words(query) {
+    return TextMatchApi.normalize(query).split(/\s+/).filter((word) => word !== "");
+  }
+  static occurrences(compared, word) {
+    const found = [];
+    for (let at = compared.indexOf(word);at !== -1; at = compared.indexOf(word, at + word.length))
+      found.push([at, at + word.length]);
+    return found;
+  }
+  static merge(ranges) {
+    const merged = [];
+    for (const [from, to] of [...ranges].sort((a, b) => a[0] - b[0])) {
+      const last = merged[merged.length - 1];
+      if (last && from <= last[1])
+        last[1] = Math.max(last[1], to);
+      else
+        merged.push([from, to]);
+    }
+    return merged;
+  }
+  static push(segments, text, isMatch) {
+    if (text !== "")
+      segments.push({ text, isMatch });
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/SearchViewModel.ts
+var DEFAULT_MIN_LENGTH = 3;
+var DEFAULT_DEBOUNCE_MS = 300;
+
+class SearchViewModel extends WebViewModel {
+  _provider;
+  _options;
+  label = "";
+  placeholder = "";
+  clearLabel = "";
+  tooShortText = "";
+  noResultsText = "";
+  searchingText = "";
+  failedText = "";
+  query = "";
+  state = "idle";
+  results = [];
+  rows = [];
+  activeIndex = -1;
+  isOpen = false;
+  error = undefined;
+  _generation = 0;
+  _wait;
+  _running;
+  _minLength;
+  _debounceMs;
+  constructor(_provider, _options) {
+    super();
+    this._provider = _provider;
+    this._options = _options;
+    this._minLength = _options.minLength ?? DEFAULT_MIN_LENGTH;
+    this._debounceMs = _options.debounceMs ?? DEFAULT_DEBOUNCE_MS;
+  }
+  get hint() {
+    switch (this.state) {
+      case "tooShort":
+        return this.tooShortText;
+      case "searching":
+        return this.rows.length === 0 ? this.searchingText : "";
+      case "failed":
+        return this.failedText;
+      case "done":
+        return this.rows.length === 0 ? this.noResultsText : "";
+      default:
+        return "";
+    }
+  }
+  setQuery(value) {
+    this.query = value;
+    this._stop();
+    const trimmed = value.trim();
+    if (trimmed === "") {
+      this._reset("idle");
+      this.isOpen = false;
+    } else if ([...trimmed].length < this._minLength) {
+      this._reset("tooShort");
+      this.isOpen = true;
+    } else {
+      this.state = "waiting";
+      this.error = undefined;
+      this.isOpen = true;
+      const generation = this._generation;
+      this._wait = this._options.timer.after(this._debounceMs, () => this._run(trimmed, generation));
+    }
+  }
+  clear() {
+    this.setQuery("");
+  }
+  close() {
+    this.isOpen = false;
+  }
+  moveActive(step) {
+    if (this.rows.length === 0)
+      return;
+    this.isOpen = true;
+    this.activeIndex = (this.activeIndex + step + this.rows.length) % this.rows.length;
+  }
+  selectActive() {
+    this.select(this.activeIndex);
+  }
+  select(index) {
+    const item = this.results[index];
+    if (item === undefined)
+      return;
+    this.isOpen = false;
+    this._options.onSelect?.(item);
+  }
+  dispose() {
+    this._stop();
+  }
+  _stop() {
+    this._generation++;
+    this._wait?.cancel();
+    this._wait = undefined;
+    this._running?.abort();
+    this._running = undefined;
+  }
+  _reset(state) {
+    this.state = state;
+    this.results = [];
+    this.rows = [];
+    this.activeIndex = -1;
+    this.error = undefined;
+  }
+  async _run(query, generation) {
+    this._wait = undefined;
+    const controller = new AbortController;
+    this._running = controller;
+    this.state = "searching";
+    try {
+      const found = await this._provider.search(query, controller.signal);
+      if (generation !== this._generation)
+        return;
+      this.results = found;
+      this.rows = found.map((item) => {
+        const { title, meta } = this._options.rowOf(item);
+        return { segments: TextMatchApi.segments(title, query), meta };
+      });
+      this.activeIndex = found.length > 0 ? 0 : -1;
+      this.error = undefined;
+      this.state = "done";
+    } catch (cause) {
+      if (generation !== this._generation)
+        return;
+      this.results = [];
+      this.rows = [];
+      this.activeIndex = -1;
+      this.error = new Error(`The search for "${query}" failed: ${cause instanceof Error ? cause.message : String(cause)}`, { cause });
+      this.state = "failed";
+    } finally {
+      if (this._running === controller)
+        this._running = undefined;
+    }
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/ToasterViewModel.ts
+class ToasterViewModel extends WebViewModel {
+  _durationMs;
+  message = undefined;
+  _timer;
+  constructor(_durationMs = 2500) {
+    super();
+    this._durationMs = _durationMs;
+  }
+  show(message) {
+    clearTimeout(this._timer);
+    this.message = message;
+    this._timer = setTimeout(() => this.message = undefined, this._durationMs);
+  }
+}
 // ../../frontend/web/packages/ui/src/viewModels/dropIndex.ts
 function dropIndexAt(extents, pointerY, from) {
   if (extents.length === 0)
@@ -3260,6 +3976,77 @@ function dropIndexAt(extents, pointerY, from) {
     }
   }
   return slot > from ? slot - 1 : slot;
+}
+// ../../frontend/web/packages/ui/src/viewModels/ReorderHandleViewModel.ts
+class ReorderHandleViewModel extends WebViewModel {
+  _list;
+  itemId;
+  label = "";
+  constructor(_list, itemId) {
+    super();
+    this._list = _list;
+    this.itemId = itemId;
+  }
+  get isDragging() {
+    return this._list.draggingId === this.itemId;
+  }
+  startDrag() {
+    this._list.startDrag(this.itemId);
+  }
+}
+
+// ../../frontend/web/packages/ui/src/viewModels/StackViewModel.ts
+class StackViewModel extends WebViewModel {
+  orientation = "vertical";
+  gap = "none";
+  padding = "none";
+  alignItems = "stretch";
+  wraps = false;
+  items = [];
+  constructor(init = {}) {
+    super();
+    this.orientation = init.orientation ?? this.orientation;
+    this.gap = init.gap ?? this.gap;
+    this.padding = init.padding ?? this.padding;
+    this.alignItems = init.alignItems ?? this.alignItems;
+    this.wraps = init.wraps ?? this.wraps;
+    this.items = init.items ?? [];
+  }
+  static item(content, size) {
+    const item = new ListItemViewModel(content);
+    item.size = size;
+    return item;
+  }
+}
+
+// ../../frontend/web/packages/ui/src/viewModels/ReorderControlsViewModel.ts
+var CONTROL_SIZE = 40;
+
+class ReorderControlsViewModel extends WebViewModel {
+  _list;
+  itemId;
+  moveUp;
+  moveDown;
+  handle;
+  layout;
+  constructor(_list, itemId, options = {}) {
+    super();
+    this._list = _list;
+    this.itemId = itemId;
+    this.moveUp = new ButtonViewModel(() => this._list.moveUp(this.itemId), { variant: "icon-small", icon: "arrow-up" });
+    this.moveDown = new ButtonViewModel(() => this._list.moveDown(this.itemId), { variant: "icon-small", icon: "arrow-down" });
+    this.handle = new ReorderHandleViewModel(_list, itemId);
+    this.layout = new StackViewModel({
+      orientation: "horizontal",
+      alignItems: "center",
+      items: [...options.arrows === false ? [] : [this.moveUp, this.moveDown], this.handle].map((control) => StackViewModel.item(control, CONTROL_SIZE))
+    });
+    this.refresh();
+  }
+  refresh() {
+    this.moveUp.isEnabled = this._list.canMoveUp(this.itemId);
+    this.moveDown.isEnabled = this._list.canMoveDown(this.itemId);
+  }
 }
 // ../../frontend/web/packages/mvvm/src/disposable.ts
 class DisposableContainer {
@@ -4011,6 +4798,119 @@ var ButtonView = mvvm.createMvvmView((view) => createComponent(Show, {
   }
 }));
 delegateEvents(["click"]);
+
+// ../../frontend/web/packages/ui/src/views/ActionBarView.tsx
+var _tmpl$24 = /* @__PURE__ */ template(`<footer>`);
+function ActionBarView(props) {
+  const view = useMvvmView(props.model);
+  return createComponent(Show, {
+    get when() {
+      return view.bind((v) => v.isVisible);
+    },
+    get children() {
+      var _el$ = _tmpl$24();
+      insert(_el$, createComponent(For, {
+        get each() {
+          return view.bind((v) => v.actions.slice());
+        },
+        children: (action) => createComponent(ButtonView, {
+          model: action
+        })
+      }), null);
+      insert(_el$, () => props.children, null);
+      createRenderEffect(() => className(_el$, view.bind((v) => ["ui-action-bar", ...v.classes].join(" "))));
+      return _el$;
+    }
+  });
+}
+// ../../frontend/web/packages/ui/src/views/AppBarView.tsx
+var _tmpl$25 = /* @__PURE__ */ template(`<span class=ui-app-bar__brand>`);
+var _tmpl$26 = /* @__PURE__ */ template(`<span class=ui-app-bar__brand-caption>`);
+var _tmpl$32 = /* @__PURE__ */ template(`<span class=ui-app-bar__spacer>`);
+var _tmpl$42 = /* @__PURE__ */ template(`<span class=ui-app-bar__counter>`);
+var _tmpl$52 = /* @__PURE__ */ template(`<header>`);
+var _tmpl$62 = /* @__PURE__ */ template(`<p class=ui-app-bar__subtitle>`);
+var _tmpl$72 = /* @__PURE__ */ template(`<div class=ui-app-bar__titles><h1 class=ui-app-bar__title>`);
+function AppBarView(props) {
+  const view = useMvvmView(props.model);
+  return createComponent(Show, {
+    get when() {
+      return view.bind((v) => v.isVisible);
+    },
+    get children() {
+      var _el$ = _tmpl$52();
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return view.bind((v) => v.back);
+        },
+        children: (back) => createComponent(ButtonView, {
+          get model() {
+            return back();
+          }
+        })
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return view.bind((v) => v.brand);
+        },
+        get fallback() {
+          return (() => {
+            var _el$6 = _tmpl$72(), _el$7 = _el$6.firstChild;
+            insert(_el$7, () => view.bind((v) => v.title));
+            insert(_el$6, createComponent(Show, {
+              get when() {
+                return view.bind((v) => v.subtitle);
+              },
+              get children() {
+                var _el$8 = _tmpl$62();
+                insert(_el$8, () => view.bind((v) => v.subtitle));
+                return _el$8;
+              }
+            }), null);
+            return _el$6;
+          })();
+        },
+        get children() {
+          return [(() => {
+            var _el$2 = _tmpl$25();
+            insert(_el$2, () => view.bind((v) => v.brand));
+            return _el$2;
+          })(), createComponent(Show, {
+            get when() {
+              return view.bind((v) => v.brandCaption);
+            },
+            get children() {
+              var _el$3 = _tmpl$26();
+              insert(_el$3, () => view.bind((v) => v.brandCaption));
+              return _el$3;
+            }
+          }), _tmpl$32()];
+        }
+      }), null);
+      insert(_el$, createComponent(Show, {
+        get when() {
+          return view.bind((v) => v.counterText);
+        },
+        get children() {
+          var _el$5 = _tmpl$42();
+          insert(_el$5, () => view.bind((v) => v.counterText));
+          return _el$5;
+        }
+      }), null);
+      insert(_el$, createComponent(For, {
+        get each() {
+          return view.bind((v) => v.actions.slice());
+        },
+        children: (action) => createComponent(ButtonView, {
+          model: action
+        })
+      }), null);
+      insert(_el$, () => props.actions, null);
+      createRenderEffect(() => className(_el$, view.bind((v) => ["ui-app-bar", ...v.brand ? ["ui-app-bar--brand"] : [], ...v.classes].join(" "))));
+      return _el$;
+    }
+  });
+}
 // ../../frontend/web/packages/ui/src/views/overlayHistory.ts
 var OverlayHistoryContext = createContext(undefined);
 var OverlayHistoryProvider = OverlayHistoryContext.Provider;
@@ -4040,7 +4940,7 @@ function createOverlayBack(isOpen, onBack) {
 }
 
 // ../../frontend/web/packages/ui/src/views/ConfirmSheetView.tsx
-var _tmpl$24 = /* @__PURE__ */ template(`<dialog class=ui-sheet><h2 class=ui-sheet__title></h2><p class=ui-sheet__text></p><div class=ui-sheet__actions>`);
+var _tmpl$27 = /* @__PURE__ */ template(`<dialog class=ui-sheet><h2 class=ui-sheet__title></h2><p class=ui-sheet__text></p><div class=ui-sheet__actions>`);
 var ConfirmSheetView = mvvm.createMvvmView((view) => {
   let dialog;
   const id = createUniqueId();
@@ -4055,7 +4955,7 @@ var ConfirmSheetView = mvvm.createMvvmView((view) => {
       dialog.close();
   });
   return (() => {
-    var _el$ = _tmpl$24(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
+    var _el$ = _tmpl$27(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling, _el$4 = _el$3.nextSibling;
     _el$.addEventListener("cancel", (event) => {
       event.preventDefault();
       view.viewModel.cancel.execute();
@@ -4079,9 +4979,9 @@ var ConfirmSheetView = mvvm.createMvvmView((view) => {
   })();
 });
 // ../../frontend/web/packages/ui/src/views/TextFieldView.tsx
-var _tmpl$25 = /* @__PURE__ */ template(`<textarea class=ui-field rows=4>`);
-var _tmpl$26 = /* @__PURE__ */ template(`<div><label class=ui-field-label>`);
-var _tmpl$32 = /* @__PURE__ */ template(`<input class=ui-field autocomplete=off>`);
+var _tmpl$28 = /* @__PURE__ */ template(`<textarea class=ui-field rows=4>`);
+var _tmpl$29 = /* @__PURE__ */ template(`<div><label class=ui-field-label>`);
+var _tmpl$33 = /* @__PURE__ */ template(`<input class=ui-field autocomplete=off>`);
 var TextFieldView = mvvm.createMvvmView((view) => {
   const generatedId = createUniqueId();
   const id = () => view.bind((v) => v.id) || generatedId;
@@ -4090,7 +4990,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$26(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$29(), _el$2 = _el$.firstChild;
       insert(_el$2, () => view.bind((v) => v.label));
       insert(_el$, createComponent(Show, {
         get when() {
@@ -4098,7 +4998,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$32();
+            var _el$4 = _tmpl$33();
             _el$4.$$input = (event) => view.viewModel.setValue(event.currentTarget.value);
             createRenderEffect((_p$) => {
               var _v$6 = id(), _v$7 = view.bind((v) => v.placeholder), _v$8 = !view.bind((v) => v.isEnabled);
@@ -4116,7 +5016,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
           })();
         },
         get children() {
-          var _el$3 = _tmpl$25();
+          var _el$3 = _tmpl$28();
           _el$3.$$input = (event) => view.viewModel.setValue(event.currentTarget.value);
           createRenderEffect((_p$) => {
             var _v$ = id(), _v$2 = view.bind((v) => v.placeholder), _v$3 = !view.bind((v) => v.isEnabled);
@@ -4149,11 +5049,11 @@ var TextFieldView = mvvm.createMvvmView((view) => {
 delegateEvents(["input"]);
 
 // ../../frontend/web/packages/ui/src/views/FormSheetView.tsx
-var _tmpl$27 = /* @__PURE__ */ template(`<div class=ui-sheet__fields>`);
-var _tmpl$28 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
-var _tmpl$33 = /* @__PURE__ */ template(`<div class=ui-sheet__actions>`);
-var _tmpl$42 = /* @__PURE__ */ template(`<dialog class=ui-sheet><form><h2 class=ui-sheet__title>`);
-var _tmpl$52 = /* @__PURE__ */ template(`<p class=ui-sheet__text>`);
+var _tmpl$30 = /* @__PURE__ */ template(`<div class=ui-sheet__fields>`);
+var _tmpl$210 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
+var _tmpl$34 = /* @__PURE__ */ template(`<div class=ui-sheet__actions>`);
+var _tmpl$43 = /* @__PURE__ */ template(`<dialog class=ui-sheet><form><h2 class=ui-sheet__title>`);
+var _tmpl$53 = /* @__PURE__ */ template(`<p class=ui-sheet__text>`);
 var FormSheetView = mvvm.createMvvmView((view) => {
   let dialog;
   let form;
@@ -4176,7 +5076,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
       dialog.close();
   });
   return (() => {
-    var _el$ = _tmpl$42(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$43(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.addEventListener("cancel", (event) => {
       event.preventDefault();
       view.viewModel.cancel.execute();
@@ -4200,11 +5100,11 @@ var FormSheetView = mvvm.createMvvmView((view) => {
             return view.bind((v) => v.remove);
           },
           children: (remove) => [(() => {
-            var _el$7 = _tmpl$52();
+            var _el$7 = _tmpl$53();
             insert(_el$7, () => remove().text);
             return _el$7;
           })(), (() => {
-            var _el$8 = _tmpl$33();
+            var _el$8 = _tmpl$34();
             insert(_el$8, createComponent(ButtonView, {
               get model() {
                 return remove().cancel;
@@ -4221,7 +5121,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
       },
       get children() {
         return [(() => {
-          var _el$4 = _tmpl$27();
+          var _el$4 = _tmpl$30();
           insert(_el$4, createComponent(For, {
             get each() {
               return view.bind((v) => v.fields.slice());
@@ -4236,12 +5136,12 @@ var FormSheetView = mvvm.createMvvmView((view) => {
             return view.bind((v) => v.errorText);
           },
           get children() {
-            var _el$5 = _tmpl$28();
+            var _el$5 = _tmpl$210();
             insert(_el$5, () => view.bind((v) => v.errorText));
             return _el$5;
           }
         }), (() => {
-          var _el$6 = _tmpl$33();
+          var _el$6 = _tmpl$34();
           insert(_el$6, createComponent(ButtonView, {
             get model() {
               return view.viewModel.cancel;
@@ -4270,7 +5170,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/FilePickerView.tsx
-var _tmpl$29 = /* @__PURE__ */ template(`<label><span></span><input type=file class=ui-visually-hidden>`);
+var _tmpl$31 = /* @__PURE__ */ template(`<label><span></span><input type=file class=ui-visually-hidden>`);
 var FilePickerView = mvvm.createMvvmView((view) => {
   let input;
   const choose = async (files) => {
@@ -4283,7 +5183,7 @@ var FilePickerView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$29(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$31(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$, createComponent(Show, {
         get when() {
           return view.bind((v) => v.icon);
@@ -4320,13 +5220,13 @@ var FilePickerView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/HintView.tsx
-var _tmpl$30 = /* @__PURE__ */ template(`<p>`);
+var _tmpl$35 = /* @__PURE__ */ template(`<p>`);
 var HintView = mvvm.createMvvmView((view) => createComponent(Show, {
   get when() {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$30();
+    var _el$ = _tmpl$35();
     insert(_el$, () => view.bind((v) => v.text));
     createRenderEffect((_p$) => {
       var _v$ = view.bind((v) => v.id) || undefined, _v$2 = view.bind((v) => ["ui-hint", ...v.tone === "error" ? ["ui-hint--error"] : [], ...v.classes].join(" ")), _v$3 = view.bind((v) => v.tone === "error" ? "alert" : undefined);
@@ -4344,8 +5244,8 @@ var HintView = mvvm.createMvvmView((view) => createComponent(Show, {
 }));
 
 // ../../frontend/web/packages/ui/src/views/ImageView.tsx
-var _tmpl$31 = /* @__PURE__ */ template(`<div>`);
-var _tmpl$210 = /* @__PURE__ */ template(`<img alt>`);
+var _tmpl$36 = /* @__PURE__ */ template(`<div>`);
+var _tmpl$211 = /* @__PURE__ */ template(`<img alt>`);
 var ImageView = mvvm.createMvvmView((view) => {
   let current;
   const [url] = createResource(() => view.bind((v) => v.key), async () => {
@@ -4361,7 +5261,7 @@ var ImageView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$31();
+      var _el$ = _tmpl$36();
       insert(_el$, createComponent(Show, {
         get when() {
           return memo(() => !!view.bind((v) => v.hasImage))() && url();
@@ -4374,7 +5274,7 @@ var ImageView = mvvm.createMvvmView((view) => {
           });
         },
         children: (src) => (() => {
-          var _el$2 = _tmpl$210();
+          var _el$2 = _tmpl$211();
           createRenderEffect(() => setAttribute(_el$2, "src", src()));
           return _el$2;
         })()
@@ -4394,19 +5294,19 @@ var ImageView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/PictureView.tsx
-var _tmpl$34 = /* @__PURE__ */ template(`<span class=ui-picture__hint>`);
-var _tmpl$211 = /* @__PURE__ */ template(`<label><input type=file class=ui-visually-hidden>`);
-var _tmpl$35 = /* @__PURE__ */ template(`<button type=button class=ui-picture__open>`);
-var _tmpl$43 = /* @__PURE__ */ template(`<div class=ui-picture__actions>`);
-var _tmpl$53 = /* @__PURE__ */ template(`<div><dialog class=ui-viewer><div class=ui-viewer__bar></div><div class=ui-viewer__scroll><div class=ui-viewer__stage>`);
-var _tmpl$62 = /* @__PURE__ */ template(`<img alt>`);
+var _tmpl$37 = /* @__PURE__ */ template(`<span class=ui-picture__hint>`);
+var _tmpl$212 = /* @__PURE__ */ template(`<label><input type=file class=ui-visually-hidden>`);
+var _tmpl$38 = /* @__PURE__ */ template(`<button type=button class=ui-picture__open>`);
+var _tmpl$44 = /* @__PURE__ */ template(`<div class=ui-picture__actions>`);
+var _tmpl$54 = /* @__PURE__ */ template(`<div><dialog class=ui-viewer><div class=ui-viewer__bar></div><div class=ui-viewer__scroll><div class=ui-viewer__stage>`);
+var _tmpl$63 = /* @__PURE__ */ template(`<img alt>`);
 function EmptyHint(props) {
   return [createComponent(UiIcon, {
     get name() {
       return props.icon;
     }
   }), (() => {
-    var _el$ = _tmpl$34();
+    var _el$ = _tmpl$37();
     insert(_el$, () => props.text);
     return _el$;
   })()];
@@ -4492,7 +5392,7 @@ var PictureView = mvvm.createMvvmView((view) => {
     return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
   };
   const filePicker = (cover) => (() => {
-    var _el$2 = _tmpl$211(), _el$3 = _el$2.firstChild;
+    var _el$2 = _tmpl$212(), _el$3 = _el$2.firstChild;
     className(_el$2, cover ? "ui-picture__cover" : "ui-icon-button ui-icon-button--small ui-picture__action");
     insert(_el$2, createComponent(Show, {
       when: !cover,
@@ -4534,7 +5434,7 @@ var PictureView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$4 = _tmpl$53(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild;
+      var _el$4 = _tmpl$54(), _el$7 = _el$4.firstChild, _el$8 = _el$7.firstChild, _el$9 = _el$8.nextSibling, _el$0 = _el$9.firstChild;
       insert(_el$4, createComponent(ImageView, {
         get model() {
           return view.viewModel.image;
@@ -4545,7 +5445,7 @@ var PictureView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.hasImage);
         },
         get children() {
-          var _el$5 = _tmpl$35();
+          var _el$5 = _tmpl$38();
           _el$5.$$click = () => view.viewModel.open();
           createRenderEffect((_p$) => {
             var _v$5 = view.bind((v) => v.texts.openTooltipText), _v$6 = view.bind((v) => v.texts.openTooltipText);
@@ -4572,7 +5472,7 @@ var PictureView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.showsActions);
         },
         get children() {
-          var _el$6 = _tmpl$43();
+          var _el$6 = _tmpl$44();
           insert(_el$6, createComponent(Show, {
             get when() {
               return view.bind((v) => v.canPick);
@@ -4652,7 +5552,7 @@ var PictureView = mvvm.createMvvmView((view) => {
           return url();
         },
         children: (src) => (() => {
-          var _el$1 = _tmpl$62();
+          var _el$1 = _tmpl$63();
           _el$1.addEventListener("load", (event) => setNatural({
             width: event.currentTarget.naturalWidth,
             height: event.currentTarget.naturalHeight
@@ -4689,6 +5589,16 @@ delegateEvents(["click", "dblclick", "pointerdown", "pointermove", "pointerup"])
 
 // ../../frontend/web/packages/ui/src/views/ViewRegistryContext.tsx
 var ViewRegistryContext = createContext();
+function ViewRegistryProvider(props) {
+  return createComponent(ViewRegistryContext.Provider, {
+    get value() {
+      return props.registry;
+    },
+    get children() {
+      return props.children;
+    }
+  });
+}
 function useViewRegistry() {
   const registry = useContext(ViewRegistryContext);
   if (!registry)
@@ -4714,10 +5624,10 @@ function ViewSelector(props) {
 }
 
 // ../../frontend/web/packages/ui/src/views/ListRowView.tsx
-var _tmpl$36 = /* @__PURE__ */ template(`<span class=ui-list-row__leading>`);
-var _tmpl$212 = /* @__PURE__ */ template(`<span class=ui-list-row__meta>`);
-var _tmpl$37 = /* @__PURE__ */ template(`<span class=ui-list-row__trailing>`);
-var _tmpl$44 = /* @__PURE__ */ template(`<a><span class=ui-list-row__text><span class=ui-list-row__title>`);
+var _tmpl$39 = /* @__PURE__ */ template(`<span class=ui-list-row__leading>`);
+var _tmpl$213 = /* @__PURE__ */ template(`<span class=ui-list-row__meta>`);
+var _tmpl$310 = /* @__PURE__ */ template(`<span class=ui-list-row__trailing>`);
+var _tmpl$45 = /* @__PURE__ */ template(`<a><span class=ui-list-row__text><span class=ui-list-row__title>`);
 function Content(props) {
   return createComponent(Show, {
     get when() {
@@ -4731,7 +5641,7 @@ function Content(props) {
   });
 }
 var ListRowView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$44(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild;
+  var _el$ = _tmpl$45(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild;
   _el$.$$click = (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0)
       return;
@@ -4743,7 +5653,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.leading);
     },
     get children() {
-      var _el$2 = _tmpl$36();
+      var _el$2 = _tmpl$39();
       insert(_el$2, createComponent(Content, {
         get content() {
           return view.bind((v) => v.leading);
@@ -4758,7 +5668,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.meta);
     },
     get children() {
-      var _el$5 = _tmpl$212();
+      var _el$5 = _tmpl$213();
       insert(_el$5, () => view.bind((v) => v.meta));
       return _el$5;
     }
@@ -4768,7 +5678,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.trailing);
     },
     get children() {
-      var _el$6 = _tmpl$37();
+      var _el$6 = _tmpl$310();
       insert(_el$6, createComponent(Content, {
         get content() {
           return view.bind((v) => v.trailing);
@@ -4795,10 +5705,10 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
 delegateEvents(["click"]);
 
 // ../../frontend/web/packages/ui/src/views/ListView.tsx
-var _tmpl$38 = /* @__PURE__ */ template(`<li>`);
-var _tmpl$213 = /* @__PURE__ */ template(`<div class=ui-list-row__controls>`);
-var _tmpl$39 = /* @__PURE__ */ template(`<ul>`);
-var _tmpl$45 = /* @__PURE__ */ template(`<div class=ui-reorderable><div class=ui-reorder-dropline></div><div class=ui-visually-hidden aria-live=polite>`);
+var _tmpl$40 = /* @__PURE__ */ template(`<li>`);
+var _tmpl$214 = /* @__PURE__ */ template(`<div class=ui-list-row__controls>`);
+var _tmpl$311 = /* @__PURE__ */ template(`<ul>`);
+var _tmpl$46 = /* @__PURE__ */ template(`<div class=ui-reorderable><div class=ui-reorder-dropline></div><div class=ui-visually-hidden aria-live=polite>`);
 function ListItem(props) {
   const view = useMvvmView(props.model);
   return createComponent(Show, {
@@ -4806,7 +5716,7 @@ function ListItem(props) {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$38();
+      var _el$ = _tmpl$40();
       insert(_el$, createComponent(ViewSelector, {
         get model() {
           return view.bind((v) => v.content);
@@ -4817,7 +5727,7 @@ function ListItem(props) {
           return view.bind((v) => v.controls);
         },
         children: (controls) => (() => {
-          var _el$2 = _tmpl$213();
+          var _el$2 = _tmpl$214();
           insert(_el$2, createComponent(ViewSelector, {
             get model() {
               return controls();
@@ -4938,7 +5848,7 @@ var ListView = mvvm.createMvvmView((view) => {
     return (index < from ? target.top : target.bottom) - container.getBoundingClientRect().top;
   };
   const list = () => (() => {
-    var _el$3 = _tmpl$39();
+    var _el$3 = _tmpl$311();
     insert(_el$3, createComponent(For, {
       get each() {
         return view.bind((v) => v.items.slice());
@@ -4973,7 +5883,7 @@ var ListView = mvvm.createMvvmView((view) => {
           return list();
         },
         get children() {
-          var _el$4 = _tmpl$45(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+          var _el$4 = _tmpl$46(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
           var _ref$ = container;
           typeof _ref$ === "function" ? use(_ref$, _el$4) : container = _el$4;
           insert(_el$4, list, _el$5);
@@ -4994,14 +5904,85 @@ var ListView = mvvm.createMvvmView((view) => {
   });
 });
 
+// ../../frontend/web/packages/ui/src/views/useWideLayout.ts
+var WIDE_LAYOUT_QUERY = "(min-width: 760px)";
+function useWideLayout(query = WIDE_LAYOUT_QUERY) {
+  const media = window.matchMedia(query);
+  const [wide, setWide] = createSignal(media.matches);
+  const update = () => setWide(media.matches);
+  media.addEventListener("change", update);
+  onCleanup(() => media.removeEventListener("change", update));
+  return wide;
+}
+
+// ../../frontend/web/packages/ui/src/views/MasterDetailView.tsx
+var _tmpl$41 = /* @__PURE__ */ template(`<div class=ui-master-detail><div class="ui-pane ui-pane--master"></div><div class="ui-pane ui-pane--detail">`);
+var _tmpl$215 = /* @__PURE__ */ template(`<div class=ui-pane>`);
+function MasterDetailView(props) {
+  const view = useMvvmView(props.model);
+  const wide = useWideLayout();
+  const masterJsx = children(() => props.master);
+  const detailJsx = children(() => props.detail);
+  const placeholderJsx = children(() => props.placeholder);
+  const hasDetail = () => detailJsx.toArray().length > 0 || view.bind((v) => v.detail) !== undefined;
+  const master = () => masterJsx.toArray().length > 0 ? masterJsx() : createComponent(ViewSelector, {
+    get model() {
+      return view.bind((v) => v.master);
+    }
+  });
+  const detail = () => detailJsx.toArray().length > 0 ? detailJsx() : createComponent(ViewSelector, {
+    get model() {
+      return view.bind((v) => v.detail);
+    }
+  });
+  const placeholder = () => placeholderJsx.toArray().length > 0 ? placeholderJsx() : createComponent(ViewSelector, {
+    get model() {
+      return view.bind((v) => v.placeholder);
+    }
+  });
+  return createComponent(Show, {
+    get when() {
+      return wide();
+    },
+    get fallback() {
+      return createComponent(Show, {
+        get when() {
+          return hasDetail();
+        },
+        get fallback() {
+          return (() => {
+            var _el$5 = _tmpl$215();
+            insert(_el$5, master);
+            return _el$5;
+          })();
+        },
+        get children() {
+          var _el$4 = _tmpl$215();
+          insert(_el$4, detail);
+          return _el$4;
+        }
+      });
+    },
+    get children() {
+      var _el$ = _tmpl$41(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      insert(_el$2, master);
+      insert(_el$3, (() => {
+        var _c$ = memo(() => !!hasDetail());
+        return () => _c$() ? detail() : placeholder();
+      })());
+      return _el$;
+    }
+  });
+}
+
 // ../../frontend/web/packages/ui/src/views/ProgressBarView.tsx
-var _tmpl$40 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
+var _tmpl$47 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
 var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
   get when() {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$40(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
+    var _el$ = _tmpl$47(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
     insert(_el$4, () => view.bind((v) => v.label));
     createRenderEffect((_p$) => {
       var _v$ = view.bind((v) => ["ui-progress", ...v.classes].join(" ")), _v$2 = view.bind((v) => v.total), _v$3 = view.bind((v) => v.done), _v$4 = view.bind((v) => `ui-progress__fill ui-progress__fill--${v.effectiveTone}`), _v$5 = `${view.bind((v) => v.percent)}%`;
@@ -5023,9 +6004,9 @@ var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
 }));
 
 // ../../frontend/web/packages/ui/src/views/ReorderControlsView.tsx
-var _tmpl$41 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
+var _tmpl$48 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
 var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$41();
+  var _el$ = _tmpl$48();
   insert(_el$, createComponent(ViewSelector, {
     get model() {
       return view.viewModel.layout;
@@ -5036,9 +6017,9 @@ var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
 })());
 
 // ../../frontend/web/packages/ui/src/views/ReorderHandleView.tsx
-var _tmpl$46 = /* @__PURE__ */ template(`<button type=button>`);
+var _tmpl$49 = /* @__PURE__ */ template(`<button type=button>`);
 var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$46();
+  var _el$ = _tmpl$49();
   _el$.$$pointerdown = (event) => {
     if (event.button !== 0)
       return;
@@ -5062,13 +6043,13 @@ var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
 delegateEvents(["pointerdown"]);
 
 // ../../frontend/web/packages/ui/src/views/SearchView.tsx
-var _tmpl$47 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
-var _tmpl$214 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
-var _tmpl$310 = /* @__PURE__ */ template(`<div class=ui-search__dropdown><ul class=ui-search__results role=listbox>`);
-var _tmpl$48 = /* @__PURE__ */ template(`<div><div class=ui-search__field><input class=ui-search__input type=search role=combobox autocomplete=off>`);
-var _tmpl$54 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
-var _tmpl$63 = /* @__PURE__ */ template(`<li class=ui-search__result role=option><span class=ui-search__title>`);
-var _tmpl$72 = /* @__PURE__ */ template(`<mark>`);
+var _tmpl$50 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
+var _tmpl$216 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
+var _tmpl$312 = /* @__PURE__ */ template(`<div class=ui-search__dropdown><ul class=ui-search__results role=listbox>`);
+var _tmpl$410 = /* @__PURE__ */ template(`<div><div class=ui-search__field><input class=ui-search__input type=search role=combobox autocomplete=off>`);
+var _tmpl$55 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
+var _tmpl$64 = /* @__PURE__ */ template(`<li class=ui-search__result role=option><span class=ui-search__title>`);
+var _tmpl$73 = /* @__PURE__ */ template(`<mark>`);
 var SearchView = mvvm.createMvvmView((view) => {
   const generatedId = createUniqueId();
   const id = () => view.bind((v) => v.id) || generatedId;
@@ -5094,7 +6075,7 @@ var SearchView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$48(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$410(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       insert(_el$2, createComponent(UiIcon, {
         name: "search"
       }), _el$3);
@@ -5105,7 +6086,7 @@ var SearchView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.query !== "");
         },
         get children() {
-          var _el$4 = _tmpl$47();
+          var _el$4 = _tmpl$50();
           _el$4.$$click = () => view.viewModel.clear();
           insert(_el$4, createComponent(UiIcon, {
             name: "close"
@@ -5119,14 +6100,14 @@ var SearchView = mvvm.createMvvmView((view) => {
           return hasDropdown();
         },
         get children() {
-          var _el$5 = _tmpl$310(), _el$7 = _el$5.firstChild;
+          var _el$5 = _tmpl$312(), _el$7 = _el$5.firstChild;
           _el$5.$$mousedown = (event) => event.preventDefault();
           insert(_el$5, createComponent(Show, {
             get when() {
               return view.bind((v) => v.hint);
             },
             get children() {
-              var _el$6 = _tmpl$214();
+              var _el$6 = _tmpl$216();
               insert(_el$6, () => view.bind((v) => v.hint));
               return _el$6;
             }
@@ -5136,14 +6117,14 @@ var SearchView = mvvm.createMvvmView((view) => {
               return view.bind((v) => v.rows);
             },
             children: (row, index) => (() => {
-              var _el$8 = _tmpl$63(), _el$9 = _el$8.firstChild;
+              var _el$8 = _tmpl$64(), _el$9 = _el$8.firstChild;
               _el$8.$$click = () => view.viewModel.select(index());
               insert(_el$9, createComponent(For, {
                 get each() {
                   return row.segments;
                 },
                 children: (segment) => segment.isMatch ? (() => {
-                  var _el$1 = _tmpl$72();
+                  var _el$1 = _tmpl$73();
                   insert(_el$1, () => segment.text);
                   return _el$1;
                 })() : memo(() => segment.text)
@@ -5153,7 +6134,7 @@ var SearchView = mvvm.createMvvmView((view) => {
                   return row.meta;
                 },
                 get children() {
-                  var _el$0 = _tmpl$54();
+                  var _el$0 = _tmpl$55();
                   insert(_el$0, () => row.meta);
                   return _el$0;
                 }
@@ -5205,7 +6186,7 @@ var SearchView = mvvm.createMvvmView((view) => {
 delegateEvents(["input", "keydown", "click", "mousedown"]);
 
 // ../../frontend/web/packages/ui/src/views/StackView.tsx
-var _tmpl$49 = /* @__PURE__ */ template(`<div>`);
+var _tmpl$51 = /* @__PURE__ */ template(`<div>`);
 var SPACE = {
   none: "0px",
   small: "var(--ui-space-2)",
@@ -5220,7 +6201,7 @@ function StackItem(props) {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$49();
+      var _el$ = _tmpl$51();
       insert(_el$, createComponent(ViewSelector, {
         get model() {
           return view.bind((v) => v.content);
@@ -5244,7 +6225,7 @@ var StackView = mvvm.createMvvmView((view) => createComponent(Show, {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$2 = _tmpl$49();
+    var _el$2 = _tmpl$51();
     insert(_el$2, createComponent(For, {
       get each() {
         return view.bind((v) => v.items.slice());
@@ -5254,42 +6235,72 @@ var StackView = mvvm.createMvvmView((view) => createComponent(Show, {
       })
     }));
     createRenderEffect((_p$) => {
-      var _v$3 = view.bind((v) => v.id) || undefined, _v$4 = view.bind((v) => ["ui-stack", `ui-stack--${v.orientation}`, ...v.wraps ? ["ui-stack--wrap"] : [], ...v.classes].join(" ")), _v$5 = view.bind((v) => length(v.gap)), _v$6 = view.bind((v) => v.alignItems === "start" || v.alignItems === "end" ? `flex-${v.alignItems}` : v.alignItems);
+      var _v$3 = view.bind((v) => v.id) || undefined, _v$4 = view.bind((v) => ["ui-stack", `ui-stack--${v.orientation}`, ...v.wraps ? ["ui-stack--wrap"] : [], ...v.classes].join(" ")), _v$5 = view.bind((v) => length(v.gap)), _v$6 = view.bind((v) => length(v.padding)), _v$7 = view.bind((v) => v.alignItems === "start" || v.alignItems === "end" ? `flex-${v.alignItems}` : v.alignItems);
       _v$3 !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$3);
       _v$4 !== _p$.t && className(_el$2, _p$.t = _v$4);
       _v$5 !== _p$.a && setStyleProperty(_el$2, "--ui-stack-gap", _p$.a = _v$5);
-      _v$6 !== _p$.o && setStyleProperty(_el$2, "--ui-stack-align", _p$.o = _v$6);
+      _v$6 !== _p$.o && setStyleProperty(_el$2, "--ui-stack-padding", _p$.o = _v$6);
+      _v$7 !== _p$.i && setStyleProperty(_el$2, "--ui-stack-align", _p$.i = _v$7);
       return _p$;
     }, {
       e: undefined,
       t: undefined,
       a: undefined,
-      o: undefined
+      o: undefined,
+      i: undefined
     });
     return _el$2;
   }
 }));
 
 // ../../frontend/web/packages/ui/src/views/ToasterView.tsx
-var _tmpl$50 = /* @__PURE__ */ template(`<div class=ui-toast>`);
-var _tmpl$215 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
+var _tmpl$56 = /* @__PURE__ */ template(`<div class=ui-toast>`);
+var _tmpl$217 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
 var ToasterView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$215();
+  var _el$ = _tmpl$217();
   insert(_el$, createComponent(Show, {
     get when() {
       return view.bind((v) => v.message);
     },
     get children() {
-      var _el$2 = _tmpl$50();
+      var _el$2 = _tmpl$56();
       insert(_el$2, () => view.bind((v) => v.message));
       return _el$2;
     }
   }));
   return _el$;
 })());
+
+// ../../frontend/web/packages/ui/src/views/ViewRegistry.ts
+class ViewRegistry {
+  views = new Map;
+  register(viewModel, view) {
+    this.views.set(viewModel, view);
+    return this;
+  }
+  find(model) {
+    for (let prototype = Object.getPrototypeOf(model);prototype && prototype !== Object.prototype; prototype = Object.getPrototypeOf(prototype)) {
+      const view = this.views.get(prototype.constructor);
+      if (view)
+        return view;
+    }
+    return;
+  }
+  resolve(model) {
+    const view = this.find(model);
+    if (!view)
+      throw new Error(`No view is registered for the ViewModel class ${model.constructor.name}.`);
+    return view;
+  }
+}
+
+// ../../frontend/web/packages/ui/src/views/createUiViewRegistry.ts
+function createUiViewRegistry() {
+  return new ViewRegistry().register(ActionBarViewModel, ActionBarView).register(AppBarViewModel, AppBarView).register(ButtonViewModel, ButtonView).register(ConfirmSheetViewModel, ConfirmSheetView).register(FormSheetViewModel, FormSheetView).register(FilePickerViewModel, FilePickerView).register(HintViewModel, HintView).register(ImageViewModel, ImageView).register(PictureViewModel, PictureView).register(ListRowViewModel, ListRowView).register(ListViewModel, ListView).register(MasterDetailViewModel, MasterDetailView).register(ProgressBarViewModel, ProgressBarView).register(ReorderControlsViewModel, ReorderControlsView).register(ReorderHandleViewModel, ReorderHandleView).register(SearchViewModel, SearchView).register(StackViewModel, StackView).register(TextFieldViewModel, TextFieldView).register(ToasterViewModel, ToasterView);
+}
 // ../../frontend/web/packages/ui/src/views/DropdownFieldView.tsx
-var _tmpl$51 = /* @__PURE__ */ template(`<div><label class=ui-field-label></label><select class=ui-field>`);
-var _tmpl$216 = /* @__PURE__ */ template(`<option>`);
+var _tmpl$57 = /* @__PURE__ */ template(`<div><label class=ui-field-label></label><select class=ui-field>`);
+var _tmpl$218 = /* @__PURE__ */ template(`<option>`);
 var DropdownFieldView = mvvm.createMvvmView((view) => {
   const generatedId = createUniqueId();
   const id = () => view.bind((v) => v.id) || generatedId;
@@ -5298,7 +6309,7 @@ var DropdownFieldView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$51(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$57(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, () => view.bind((v) => v.labelText));
       _el$3.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.value));
       insert(_el$3, createComponent(For, {
@@ -5306,7 +6317,7 @@ var DropdownFieldView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.options.slice());
         },
         children: (option) => (() => {
-          var _el$4 = _tmpl$216();
+          var _el$4 = _tmpl$218();
           _el$4.value = option;
           insert(_el$4, option);
           createRenderEffect(() => _el$4.selected = view.bind((v) => v.value === option));
@@ -5330,8 +6341,33 @@ var DropdownFieldView = mvvm.createMvvmView((view) => {
     }
   });
 });
+// ../../frontend/web/packages/ui/src/views/InfoFieldView.tsx
+var _tmpl$58 = /* @__PURE__ */ template(`<span class=ui-info__text>`);
+var _tmpl$219 = /* @__PURE__ */ template(`<div><span class=ui-info__label>`);
+var InfoFieldView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$219(), _el$2 = _el$.firstChild;
+    insert(_el$2, () => view.bind((v) => v.labelText));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return view.bind((v) => v.valueText !== "");
+      },
+      get children() {
+        var _el$3 = _tmpl$58();
+        insert(_el$3, () => view.bind((v) => v.valueText));
+        return _el$3;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-info", ...v.classes].join(" "))));
+    return _el$;
+  }
+}));
+
 // ../../frontend/web/packages/ui/src/views/SwitchFieldView.tsx
-var _tmpl$55 = /* @__PURE__ */ template(`<label><input type=checkbox role=switch><span class=ui-switch__text>`);
+var _tmpl$59 = /* @__PURE__ */ template(`<label><input type=checkbox role=switch><span class=ui-switch__text>`);
 var SwitchFieldView = mvvm.createMvvmView((view) => {
   const generatedId = createUniqueId();
   const id = () => view.bind((v) => v.id) || generatedId;
@@ -5340,7 +6376,7 @@ var SwitchFieldView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$55(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$59(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       _el$2.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.checked));
       insert(_el$3, () => view.bind((v) => v.labelText));
       createRenderEffect((_p$) => {
@@ -5363,11 +6399,11 @@ var SwitchFieldView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/DynamicFormView.tsx
-var _tmpl$56 = /* @__PURE__ */ template(`<p class=ui-dynamic-form__loading>`);
-var _tmpl$217 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
-var _tmpl$311 = /* @__PURE__ */ template(`<form><h2 class=ui-dynamic-form__title></h2><div class=ui-sheet__actions>`);
-var _tmpl$410 = /* @__PURE__ */ template(`<section class=ui-dynamic-form__rows><h3 class=ui-dynamic-form__rows-title>`);
-var _tmpl$57 = /* @__PURE__ */ template(`<fieldset class=ui-dynamic-form__row><legend class=ui-dynamic-form__row-title>`);
+var _tmpl$60 = /* @__PURE__ */ template(`<p class=ui-dynamic-form__loading>`);
+var _tmpl$220 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
+var _tmpl$313 = /* @__PURE__ */ template(`<form><h2 class=ui-dynamic-form__title></h2><div class=ui-sheet__actions>`);
+var _tmpl$411 = /* @__PURE__ */ template(`<section class=ui-dynamic-form__rows><h3 class=ui-dynamic-form__rows-title>`);
+var _tmpl$510 = /* @__PURE__ */ template(`<fieldset class=ui-dynamic-form__row><legend class=ui-dynamic-form__row-title>`);
 function FieldView(props) {
   const field = props.field;
   if (field instanceof DropdownFieldViewModel)
@@ -5376,6 +6412,10 @@ function FieldView(props) {
     });
   if (field instanceof SwitchFieldViewModel)
     return createComponent(SwitchFieldView, {
+      model: field
+    });
+  if (field instanceof InfoFieldViewModel)
+    return createComponent(InfoFieldView, {
       model: field
     });
   return createComponent(TextFieldView, {
@@ -5387,7 +6427,7 @@ var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$311(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling;
+    var _el$ = _tmpl$313(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling;
     _el$.addEventListener("submit", (event) => {
       event.preventDefault();
       view.viewModel.submit.execute();
@@ -5398,7 +6438,7 @@ var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
         return view.bind((v) => v.state === "loading");
       },
       get children() {
-        var _el$3 = _tmpl$56();
+        var _el$3 = _tmpl$60();
         insert(_el$3, () => view.viewModel.loadingText);
         return _el$3;
       }
@@ -5412,14 +6452,14 @@ var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
           return item.field;
         }
       }) : (() => {
-        var _el$6 = _tmpl$410(), _el$7 = _el$6.firstChild;
+        var _el$6 = _tmpl$411(), _el$7 = _el$6.firstChild;
         insert(_el$7, () => item.labelText);
         insert(_el$6, createComponent(For, {
           get each() {
             return item.rows;
           },
           children: (row) => (() => {
-            var _el$8 = _tmpl$57(), _el$9 = _el$8.firstChild;
+            var _el$8 = _tmpl$510(), _el$9 = _el$8.firstChild;
             insert(_el$9, () => row.labelText);
             insert(_el$8, createComponent(For, {
               get each() {
@@ -5440,7 +6480,7 @@ var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
         return view.bind((v) => v.errorText);
       },
       get children() {
-        var _el$4 = _tmpl$217();
+        var _el$4 = _tmpl$220();
         insert(_el$4, () => view.bind((v) => v.errorText));
         return _el$4;
       }
@@ -5698,5 +6738,9 @@ class TelegramMiniAppApi {
 var telegram = TelegramMiniAppApi.fromWindow(window);
 var request = new HashFormRequestApi(location.hash);
 var form = new DynamicFormViewModel(new HashFormSource(request), new TelegramFormTarget(request, telegram, () => Date.now()), texts_de_default);
-render(() => DynamicFormView({ model: form }), document.getElementById("app"));
+var page = new StackViewModel({ padding: "large", items: [StackViewModel.item(form)] });
+var registry = createUiViewRegistry().register(DynamicFormViewModel, DynamicFormView);
+render(() => createComponent(ViewRegistryProvider, { registry, get children() {
+  return createComponent(StackView, { model: page });
+} }), document.getElementById("app"));
 telegram.ready();
