@@ -266,6 +266,23 @@
   min-width: 0;
 }
 
+.ui-info {
+  display: grid;
+  gap: var(--ui-space-1);
+  min-width: 0;
+}
+
+.ui-info__label {
+  overflow-wrap: anywhere;
+  font-weight: 700;
+}
+
+.ui-info__text {
+  color: var(--ui-color-muted);
+  font-size: var(--ui-text-s);
+  overflow-wrap: anywhere;
+}
+
 .ui-dynamic-form {
   display: grid;
   gap: var(--ui-space-3);
@@ -838,6 +855,7 @@
 .ui-stack {
   display: flex;
   gap: var(--ui-stack-gap, 0);
+  padding: var(--ui-stack-padding, 0);
   align-items: var(--ui-stack-align, stretch);
   min-width: 0;
   min-height: 0;
