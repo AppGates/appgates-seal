@@ -57,30 +57,34 @@
 }
 
 :root {
-  --ui-color-ink: #1a2326;
-  --ui-color-muted: #5d6a70;
-  --ui-color-line: #d9dfe3;
-  --ui-color-surface: #fff;
-  --ui-color-neutral-pale: #eef1f3;
-  --ui-color-track: #e3e8eb;
-  --ui-color-accent: #1f6feb;
-  --ui-color-accent-pale: #e6f0fd;
-  --ui-color-on-accent: #fff;
-  --ui-color-app-bar: #1a2326;
-  --ui-color-on-app-bar: #fff;
-  --ui-color-on-app-bar-muted: #9bb7bd;
-  --ui-color-app-bar-highlight: #ffffff1f;
-  --ui-color-app-bar-pressed: #ffffff26;
-  --ui-color-warn: #965a16;
-  --ui-color-warn-pale: #fff1e0;
-  --ui-color-warn-border: #e9bf8a;
-  --ui-color-bad: #a4413e;
-  --ui-color-on-bad: #fff;
-  --ui-color-toast: #1a2326;
-  --ui-color-on-toast: #fff;
-  --ui-color-backdrop: #1a232680;
+  --buncss-light: initial;
+  --buncss-dark: ;
+  color-scheme: light dark;
+  --ui-color-page: var(--buncss-light, #fff) var(--buncss-dark, #121a1d);
+  --ui-color-ink: var(--buncss-light, #1a2326) var(--buncss-dark, #e8eef0);
+  --ui-color-muted: var(--buncss-light, #5d6a70) var(--buncss-dark, #a9b6bb);
+  --ui-color-line: var(--buncss-light, #d9dfe3) var(--buncss-dark, #3a4a52);
+  --ui-color-surface: var(--buncss-light, #fff) var(--buncss-dark, #1b262a);
+  --ui-color-neutral-pale: var(--buncss-light, #eef1f3) var(--buncss-dark, #243136);
+  --ui-color-track: var(--buncss-light, #e3e8eb) var(--buncss-dark, #2f3e45);
+  --ui-color-accent: var(--buncss-light, #1f6feb) var(--buncss-dark, #5b9dff);
+  --ui-color-accent-pale: var(--buncss-light, #e6f0fd) var(--buncss-dark, #1c2f4d);
+  --ui-color-on-accent: var(--buncss-light, #fff) var(--buncss-dark, #0b1a2e);
+  --ui-color-app-bar: var(--buncss-light, #1a2326) var(--buncss-dark, #0e1518);
+  --ui-color-on-app-bar: var(--buncss-light, #fff) var(--buncss-dark, #fff);
+  --ui-color-on-app-bar-muted: var(--buncss-light, #9bb7bd) var(--buncss-dark, #9bb7bd);
+  --ui-color-app-bar-highlight: var(--buncss-light, #ffffff1f) var(--buncss-dark, #ffffff1f);
+  --ui-color-app-bar-pressed: var(--buncss-light, #ffffff26) var(--buncss-dark, #ffffff26);
+  --ui-color-warn: var(--buncss-light, #965a16) var(--buncss-dark, #f0b36a);
+  --ui-color-warn-pale: var(--buncss-light, #fff1e0) var(--buncss-dark, #3a2a14);
+  --ui-color-warn-border: var(--buncss-light, #e9bf8a) var(--buncss-dark, #7a5a2a);
+  --ui-color-bad: var(--buncss-light, #a4413e) var(--buncss-dark, #d9605c);
+  --ui-color-on-bad: var(--buncss-light, #fff) var(--buncss-dark, #1a0808);
+  --ui-color-toast: var(--buncss-light, #1a2326) var(--buncss-dark, #2b3a40);
+  --ui-color-on-toast: var(--buncss-light, #fff) var(--buncss-dark, #fff);
+  --ui-color-backdrop: var(--buncss-light, #1a232680) var(--buncss-dark, #0009);
   --ui-progress-accent: var(--ui-color-accent);
-  --ui-progress-ok: #18734b;
+  --ui-progress-ok: var(--buncss-light, #18734b) var(--buncss-dark, #4cc38a);
   --ui-progress-warn: var(--ui-color-warn);
   --ui-progress-bad: var(--ui-color-bad);
   --ui-progress-neutral: var(--ui-color-muted);
@@ -97,6 +101,32 @@
   --ui-text-s: .8125rem;
   --ui-text-l: 1.25rem;
   --ui-font: system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+}
+
+@media (prefers-color-scheme: dark) {
+  :root {
+    --buncss-light: ;
+    --buncss-dark: initial;
+  }
+}
+
+:root[data-theme="light"] {
+  --buncss-light: initial;
+  --buncss-dark: ;
+  color-scheme: light;
+}
+
+:root[data-theme="dark"] {
+  --buncss-light: ;
+  --buncss-dark: initial;
+  color-scheme: dark;
+}
+
+@layer ui-page {
+  body {
+    background: var(--ui-color-page);
+    color: var(--ui-color-ink);
+  }
 }
 
 @media (min-width: 1200px) {
@@ -301,11 +331,8 @@
 }
 
 .ui-dynamic-form__row {
-  display: grid;
-  gap: var(--ui-space-2);
   padding: var(--ui-space-3);
-  border: 1px solid var(--ui-color-line);
-  border-radius: var(--ui-radius-m);
+  border: 0;
   min-width: 0;
   margin: 0;
 }
@@ -898,6 +925,49 @@
   flex: 0 0 var(--ui-item-size);
 }
 
+.ui-grid {
+  display: grid;
+  grid-template-columns: var(--ui-grid-columns, minmax(0, 1fr));
+  grid-template-rows: var(--ui-grid-rows, none);
+  grid-auto-rows: auto;
+  column-gap: var(--ui-grid-column-gap, 0);
+  row-gap: var(--ui-grid-row-gap, 0);
+  min-width: 0;
+  min-height: 0;
+}
+
+.ui-grid__item {
+  overflow-wrap: anywhere;
+  min-width: 0;
+  max-width: 100%;
+  min-height: 0;
+}
+
+.ui-grid__item > * {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.ui-text {
+  font-family: var(--ui-font);
+  min-width: 0;
+}
+
+.ui-text--muted {
+  color: var(--ui-color-muted);
+}
+
+.ui-text--wrap {
+  overflow-wrap: anywhere;
+}
+
+.ui-text--ellipsis {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .ui-reorder-handle {
   touch-action: none;
   cursor: grab;
@@ -956,16 +1026,11 @@ html.ui-dragging, html.ui-dragging * {
 }
 
 /* ../../frontend/web/packages/formpage/src/theme.css */
-:root {
-  --ui-color-ink: var(--tg-theme-text-color, #1a2326);
-  --ui-color-muted: color-mix(in srgb, var(--ui-color-ink) 75%, var(--tg-theme-bg-color, #fff));
-  --ui-color-surface: var(--tg-theme-secondary-bg-color, #fff);
-  --ui-color-line: #80808073;
-  --ui-color-accent: var(--tg-theme-button-color, #1f6feb);
-  --ui-color-on-accent: var(--tg-theme-button-text-color, #fff);
-}
-
-body {
-  background: var(--tg-theme-bg-color, #fff);
-  color: var(--ui-color-ink);
+:root[data-telegram-theme] {
+  --ui-color-page: var(--tg-theme-bg-color);
+  --ui-color-ink: var(--tg-theme-text-color);
+  --ui-color-muted: color-mix(in srgb, var(--tg-theme-text-color) 75%, var(--tg-theme-bg-color));
+  --ui-color-surface: var(--tg-theme-secondary-bg-color);
+  --ui-color-accent: var(--tg-theme-button-color);
+  --ui-color-on-accent: var(--tg-theme-button-text-color);
 }
