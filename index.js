@@ -2928,15 +2928,56 @@ class DropdownFieldViewModel extends WebViewModel {
     this._onChange?.(value);
   }
 }
+// ../../frontend/web/packages/ui/src/viewModels/ListItemViewModel.ts
+class ListItemViewModel extends WebViewModel {
+  content;
+  key = undefined;
+  controls = undefined;
+  size = undefined;
+  span = undefined;
+  constructor(content, key) {
+    super();
+    this.content = content;
+    this.key = key;
+  }
+}
+
+// ../../frontend/web/packages/ui/src/viewModels/StackViewModel.ts
+class StackViewModel extends WebViewModel {
+  orientation = "vertical";
+  gap = "none";
+  padding = "none";
+  alignItems = "stretch";
+  wraps = false;
+  items = [];
+  constructor(init = {}) {
+    super();
+    this.orientation = init.orientation ?? this.orientation;
+    this.gap = init.gap ?? this.gap;
+    this.padding = init.padding ?? this.padding;
+    this.alignItems = init.alignItems ?? this.alignItems;
+    this.wraps = init.wraps ?? this.wraps;
+    this.items = init.items ?? [];
+  }
+  static item(content, size) {
+    const item = new ListItemViewModel(content);
+    item.size = size;
+    return item;
+  }
+}
+
 // ../../frontend/web/packages/ui/src/viewModels/DynamicFormRowViewModel.ts
-class DynamicFormRowViewModel {
-  id;
+class DynamicFormRowViewModel extends WebViewModel {
+  rowId;
   labelText;
   fields;
-  constructor(id, labelText, fields) {
-    this.id = id;
+  stack;
+  constructor(rowId, labelText, fields) {
+    super();
+    this.rowId = rowId;
     this.labelText = labelText;
     this.fields = fields;
+    this.stack = new StackViewModel({ gap: "small", items: fields.map((field) => StackViewModel.item(field)) });
   }
 }
 // ../../shared/typescript/packages/core/src/data/DataDiffApi.ts
@@ -3170,6 +3211,155 @@ class InfoFieldViewModel extends WebViewModel {
   }
 }
 
+// ../../frontend/web/packages/ui/src/viewModels/ListViewModel.ts
+class ListViewModel extends WebViewModel {
+  label = "";
+  reorderToggle;
+  announcement = undefined;
+  draggingId = undefined;
+  dropIndex = undefined;
+  _items = [];
+  _reorder;
+  _reorderable = false;
+  _alwaysEditing = false;
+  _editing = false;
+  _queue = Promise.resolve();
+  constructor() {
+    super();
+    this.reorderToggle = new ButtonViewModel(async () => this.toggleEditing(), { variant: "icon-small", icon: "reorder" });
+    this.reorderToggle.isVisible = false;
+  }
+  get items() {
+    return this._items;
+  }
+  set items(value) {
+    this._items = value;
+    this._refreshReordering();
+  }
+  enableReordering(options) {
+    this._reorder = options;
+    this._refreshReordering();
+  }
+  get reorderable() {
+    return this._reorderable;
+  }
+  set reorderable(value) {
+    this._reorderable = value;
+    this._refreshReordering();
+  }
+  get alwaysEditing() {
+    return this._alwaysEditing;
+  }
+  set alwaysEditing(value) {
+    this._alwaysEditing = value;
+    this._refreshReordering();
+  }
+  get editing() {
+    return this._editing;
+  }
+  set editing(value) {
+    this._editing = value;
+    this._refreshReordering();
+  }
+  get reordering() {
+    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && (this._alwaysEditing || this._editing);
+  }
+  get canToggle() {
+    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && !this._alwaysEditing;
+  }
+  toggleEditing() {
+    if (this.canToggle)
+      this.editing = !this.editing;
+  }
+  canMoveUp(key) {
+    return this.reordering && this.positionOf(key) > 0;
+  }
+  canMoveDown(key) {
+    const index = this.positionOf(key);
+    return this.reordering && index >= 0 && index < this._items.length - 1;
+  }
+  moveUp(key) {
+    return this.canMoveUp(key) ? this.moveTo(key, this.positionOf(key) - 1) : Promise.resolve();
+  }
+  moveDown(key) {
+    return this.canMoveDown(key) ? this.moveTo(key, this.positionOf(key) + 1) : Promise.resolve();
+  }
+  moveTo(key, toIndex) {
+    const options = this._reorder;
+    if (!this.reordering || !options)
+      return Promise.resolve();
+    const from = this.positionOf(key);
+    if (from < 0)
+      return Promise.resolve();
+    const target = Math.min(Math.max(Math.trunc(toIndex), 0), this._items.length - 1);
+    if (target === from)
+      return Promise.resolve();
+    const before = this._items;
+    const next = [...before];
+    const [moved] = next.splice(from, 1);
+    next.splice(target, 0, moved);
+    this.items = next;
+    this.announcement = options.announce(moved, target + 1, next.length);
+    const run = this._queue.then(async () => {
+      try {
+        await options.move(key, target);
+      } catch (error) {
+        this.items = before;
+        options.onError?.(error);
+      }
+    });
+    this._queue = run;
+    return run;
+  }
+  startDrag(key) {
+    if (!this.reordering || this.positionOf(key) < 0)
+      return;
+    this.draggingId = key;
+    this.dropIndex = this.positionOf(key);
+  }
+  dragTo(index) {
+    if (this.draggingId === undefined)
+      return;
+    this.dropIndex = Math.min(Math.max(Math.trunc(index), 0), this._items.length - 1);
+  }
+  async drop() {
+    const key = this.draggingId;
+    const index = this.dropIndex;
+    this.cancelDrag();
+    if (key !== undefined && index !== undefined)
+      await this.moveTo(key, index);
+  }
+  cancelDrag() {
+    this.draggingId = undefined;
+    this.dropIndex = undefined;
+  }
+  positionOf(key) {
+    return this._items.findIndex((item) => item.key === key);
+  }
+  _refreshReordering() {
+    const options = this._reorder;
+    const reordering = this.reordering;
+    this.reorderToggle.isVisible = this.canToggle;
+    if (!reordering) {
+      this.announcement = undefined;
+      this.draggingId = undefined;
+      this.dropIndex = undefined;
+    }
+    for (const item of this._items) {
+      if (!reordering || !options || item.key === undefined) {
+        if (item.controls !== undefined)
+          item.controls = undefined;
+        continue;
+      }
+      const existing = item.controls;
+      const controls = existing !== undefined && existing.itemId === item.key ? existing : options.controlsFor(this, item.key);
+      controls.refresh();
+      if (item.controls !== controls)
+        item.controls = controls;
+    }
+  }
+}
+
 // ../../frontend/web/packages/ui/src/viewModels/SwitchFieldViewModel.ts
 class SwitchFieldViewModel extends WebViewModel {
   _onChange;
@@ -3253,7 +3443,7 @@ class DynamicFormViewModel extends WebViewModel {
         if (!(item.field instanceof InfoFieldViewModel))
           values[item.field.key] = item.field.value;
       } else {
-        values[item.id] = Object.fromEntries(item.rows.map((row) => [row.id, Object.fromEntries(row.fields.flatMap((field) => field instanceof InfoFieldViewModel ? [] : [[field.key, field.value]]))]));
+        values[item.id] = Object.fromEntries(item.rows.map((row) => [row.rowId, Object.fromEntries(row.fields.flatMap((field) => field instanceof InfoFieldViewModel ? [] : [[field.key, field.value]]))]));
       }
     }
     return values;
@@ -3273,7 +3463,10 @@ class DynamicFormViewModel extends WebViewModel {
         const values = rowValues[row.id];
         return new DynamicFormRowViewModel(row.id, row.label, row.fields.map((leaf) => this._leaf(leaf, values[leaf.id])));
       });
-      return { kind: "rows", id: field.id, labelText: field.label, rows };
+      const list = new ListViewModel;
+      list.label = field.label;
+      list.items = rows.map((row) => new ListItemViewModel(row, row.rowId));
+      return { kind: "rows", id: field.id, labelText: field.label, rows, list };
     });
     this._refresh();
   }
@@ -3405,6 +3598,37 @@ class FilePickerViewModel extends WebViewModel {
     if (files.length === 0 || !this.isEnabled || this.isBusy)
       return;
     await this._onPick(files);
+  }
+}
+// ../../frontend/web/packages/ui/src/viewModels/GridViewModel.ts
+class GridViewModel extends WebViewModel {
+  columns;
+  rows;
+  gap;
+  items;
+  constructor(init = {}) {
+    super();
+    this.columns = init.columns ?? ["fill"];
+    this.rows = init.rows ?? [];
+    this.gap = init.gap ?? {};
+    this.items = init.items ?? [];
+  }
+  static item(content, options = {}) {
+    const item = new ListItemViewModel(content);
+    item.span = options.span;
+    return item;
+  }
+  static trackLength(track) {
+    if (track === "auto")
+      return "auto";
+    if (track === "fill")
+      return "minmax(0, 1fr)";
+    if (typeof track === "number")
+      return `${track}px`;
+    return `fit-content(${typeof track.max === "number" ? `${track.max}px` : track.max})`;
+  }
+  static template(tracks) {
+    return tracks.length === 0 ? undefined : tracks.map((track) => GridViewModel.trackLength(track)).join(" ");
   }
 }
 // ../../frontend/web/packages/ui/src/viewModels/HintViewModel.ts
@@ -3561,166 +3785,6 @@ class ListRowViewModel extends WebViewModel {
   open() {
     if (this.isEnabled)
       this._onOpen();
-  }
-}
-// ../../frontend/web/packages/ui/src/viewModels/ListItemViewModel.ts
-class ListItemViewModel extends WebViewModel {
-  content;
-  key = undefined;
-  controls = undefined;
-  size = undefined;
-  constructor(content, key) {
-    super();
-    this.content = content;
-    this.key = key;
-  }
-}
-// ../../frontend/web/packages/ui/src/viewModels/ListViewModel.ts
-class ListViewModel extends WebViewModel {
-  label = "";
-  reorderToggle;
-  announcement = undefined;
-  draggingId = undefined;
-  dropIndex = undefined;
-  _items = [];
-  _reorder;
-  _reorderable = false;
-  _alwaysEditing = false;
-  _editing = false;
-  _queue = Promise.resolve();
-  constructor() {
-    super();
-    this.reorderToggle = new ButtonViewModel(async () => this.toggleEditing(), { variant: "icon-small", icon: "reorder" });
-    this.reorderToggle.isVisible = false;
-  }
-  get items() {
-    return this._items;
-  }
-  set items(value) {
-    this._items = value;
-    this._refreshReordering();
-  }
-  enableReordering(options) {
-    this._reorder = options;
-    this._refreshReordering();
-  }
-  get reorderable() {
-    return this._reorderable;
-  }
-  set reorderable(value) {
-    this._reorderable = value;
-    this._refreshReordering();
-  }
-  get alwaysEditing() {
-    return this._alwaysEditing;
-  }
-  set alwaysEditing(value) {
-    this._alwaysEditing = value;
-    this._refreshReordering();
-  }
-  get editing() {
-    return this._editing;
-  }
-  set editing(value) {
-    this._editing = value;
-    this._refreshReordering();
-  }
-  get reordering() {
-    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && (this._alwaysEditing || this._editing);
-  }
-  get canToggle() {
-    return this._reorder !== undefined && this._reorderable && this._items.length > 1 && !this._alwaysEditing;
-  }
-  toggleEditing() {
-    if (this.canToggle)
-      this.editing = !this.editing;
-  }
-  canMoveUp(key) {
-    return this.reordering && this.positionOf(key) > 0;
-  }
-  canMoveDown(key) {
-    const index = this.positionOf(key);
-    return this.reordering && index >= 0 && index < this._items.length - 1;
-  }
-  moveUp(key) {
-    return this.canMoveUp(key) ? this.moveTo(key, this.positionOf(key) - 1) : Promise.resolve();
-  }
-  moveDown(key) {
-    return this.canMoveDown(key) ? this.moveTo(key, this.positionOf(key) + 1) : Promise.resolve();
-  }
-  moveTo(key, toIndex) {
-    const options = this._reorder;
-    if (!this.reordering || !options)
-      return Promise.resolve();
-    const from = this.positionOf(key);
-    if (from < 0)
-      return Promise.resolve();
-    const target = Math.min(Math.max(Math.trunc(toIndex), 0), this._items.length - 1);
-    if (target === from)
-      return Promise.resolve();
-    const before = this._items;
-    const next = [...before];
-    const [moved] = next.splice(from, 1);
-    next.splice(target, 0, moved);
-    this.items = next;
-    this.announcement = options.announce(moved, target + 1, next.length);
-    const run = this._queue.then(async () => {
-      try {
-        await options.move(key, target);
-      } catch (error) {
-        this.items = before;
-        options.onError?.(error);
-      }
-    });
-    this._queue = run;
-    return run;
-  }
-  startDrag(key) {
-    if (!this.reordering || this.positionOf(key) < 0)
-      return;
-    this.draggingId = key;
-    this.dropIndex = this.positionOf(key);
-  }
-  dragTo(index) {
-    if (this.draggingId === undefined)
-      return;
-    this.dropIndex = Math.min(Math.max(Math.trunc(index), 0), this._items.length - 1);
-  }
-  async drop() {
-    const key = this.draggingId;
-    const index = this.dropIndex;
-    this.cancelDrag();
-    if (key !== undefined && index !== undefined)
-      await this.moveTo(key, index);
-  }
-  cancelDrag() {
-    this.draggingId = undefined;
-    this.dropIndex = undefined;
-  }
-  positionOf(key) {
-    return this._items.findIndex((item) => item.key === key);
-  }
-  _refreshReordering() {
-    const options = this._reorder;
-    const reordering = this.reordering;
-    this.reorderToggle.isVisible = this.canToggle;
-    if (!reordering) {
-      this.announcement = undefined;
-      this.draggingId = undefined;
-      this.dropIndex = undefined;
-    }
-    for (const item of this._items) {
-      if (!reordering || !options || item.key === undefined) {
-        if (item.controls !== undefined)
-          item.controls = undefined;
-        continue;
-      }
-      const existing = item.controls;
-      const controls = existing !== undefined && existing.itemId === item.key ? existing : options.controlsFor(this, item.key);
-      controls.refresh();
-      if (item.controls !== controls)
-        item.controls = controls;
-    }
   }
 }
 // ../../frontend/web/packages/ui/src/viewModels/MasterDetailViewModel.ts
@@ -3948,6 +4012,18 @@ class SearchViewModel extends WebViewModel {
     }
   }
 }
+// ../../frontend/web/packages/ui/src/viewModels/TextViewModel.ts
+class TextViewModel extends WebViewModel {
+  text;
+  tone;
+  cutOff;
+  constructor(init = {}) {
+    super();
+    this.text = init.text ?? "";
+    this.tone = init.tone ?? "normal";
+    this.cutOff = init.cutOff ?? "wrap";
+  }
+}
 // ../../frontend/web/packages/ui/src/viewModels/ToasterViewModel.ts
 class ToasterViewModel extends WebViewModel {
   _durationMs;
@@ -3992,30 +4068,6 @@ class ReorderHandleViewModel extends WebViewModel {
   }
   startDrag() {
     this._list.startDrag(this.itemId);
-  }
-}
-
-// ../../frontend/web/packages/ui/src/viewModels/StackViewModel.ts
-class StackViewModel extends WebViewModel {
-  orientation = "vertical";
-  gap = "none";
-  padding = "none";
-  alignItems = "stretch";
-  wraps = false;
-  items = [];
-  constructor(init = {}) {
-    super();
-    this.orientation = init.orientation ?? this.orientation;
-    this.gap = init.gap ?? this.gap;
-    this.padding = init.padding ?? this.padding;
-    this.alignItems = init.alignItems ?? this.alignItems;
-    this.wraps = init.wraps ?? this.wraps;
-    this.items = init.items ?? [];
-  }
-  static item(content, size) {
-    const item = new ListItemViewModel(content);
-    item.size = size;
-    return item;
   }
 }
 
@@ -4978,10 +5030,236 @@ var ConfirmSheetView = mvvm.createMvvmView((view) => {
     return _el$;
   })();
 });
+// ../../frontend/web/packages/ui/src/views/DropdownFieldView.tsx
+var _tmpl$28 = /* @__PURE__ */ template(`<div><label class=ui-field-label></label><select class=ui-field>`);
+var _tmpl$29 = /* @__PURE__ */ template(`<option>`);
+var DropdownFieldView = mvvm.createMvvmView((view) => {
+  const generatedId = createUniqueId();
+  const id = () => view.bind((v) => v.id) || generatedId;
+  return createComponent(Show, {
+    get when() {
+      return view.bind((v) => v.isVisible);
+    },
+    get children() {
+      var _el$ = _tmpl$28(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      insert(_el$2, () => view.bind((v) => v.labelText));
+      _el$3.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.value));
+      insert(_el$3, createComponent(For, {
+        get each() {
+          return view.bind((v) => v.options.slice());
+        },
+        children: (option) => (() => {
+          var _el$4 = _tmpl$29();
+          _el$4.value = option;
+          insert(_el$4, option);
+          createRenderEffect(() => _el$4.selected = view.bind((v) => v.value === option));
+          return _el$4;
+        })()
+      }));
+      createRenderEffect((_p$) => {
+        var _v$ = view.bind((v) => ["ui-text-field", ...v.classes].join(" ")), _v$2 = id(), _v$3 = id(), _v$4 = !view.bind((v) => v.isEnabled);
+        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+        _v$2 !== _p$.t && setAttribute(_el$2, "for", _p$.t = _v$2);
+        _v$3 !== _p$.a && setAttribute(_el$3, "id", _p$.a = _v$3);
+        _v$4 !== _p$.o && (_el$3.disabled = _p$.o = _v$4);
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined,
+        a: undefined,
+        o: undefined
+      });
+      return _el$;
+    }
+  });
+});
+
+// ../../frontend/web/packages/ui/src/views/ViewRegistryContext.tsx
+var ViewRegistryContext = createContext();
+function ViewRegistryProvider(props) {
+  return createComponent(ViewRegistryContext.Provider, {
+    get value() {
+      return props.registry;
+    },
+    get children() {
+      return props.children;
+    }
+  });
+}
+function useViewRegistry() {
+  const registry = useContext(ViewRegistryContext);
+  if (!registry)
+    throw new Error("ViewSelector outside of <ViewRegistryProvider>.");
+  return registry;
+}
+
+// ../../frontend/web/packages/ui/src/views/ViewSelector.tsx
+function ViewSelector(props) {
+  const registry = useViewRegistry();
+  return createComponent(Show, {
+    get when() {
+      return props.model;
+    },
+    keyed: true,
+    children: (model) => createComponent(Dynamic, {
+      get component() {
+        return registry.resolve(model);
+      },
+      model
+    })
+  });
+}
+
+// ../../frontend/web/packages/ui/src/views/DynamicFormRowView.tsx
+var _tmpl$30 = /* @__PURE__ */ template(`<fieldset><legend class=ui-dynamic-form__row-title>`);
+var DynamicFormRowView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$30(), _el$2 = _el$.firstChild;
+    insert(_el$2, () => view.bind((v) => v.labelText));
+    insert(_el$, createComponent(ViewSelector, {
+      get model() {
+        return view.viewModel.stack;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-dynamic-form__row", ...v.classes].join(" "))));
+    return _el$;
+  }
+}));
+
+// ../../frontend/web/packages/ui/src/views/DynamicFormView.tsx
+var _tmpl$31 = /* @__PURE__ */ template(`<p class=ui-dynamic-form__loading>`);
+var _tmpl$210 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
+var _tmpl$33 = /* @__PURE__ */ template(`<form><h2 class=ui-dynamic-form__title></h2><div class=ui-sheet__actions>`);
+var _tmpl$43 = /* @__PURE__ */ template(`<section class=ui-dynamic-form__rows><h3 class=ui-dynamic-form__rows-title>`);
+var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$33(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling;
+    _el$.addEventListener("submit", (event) => {
+      event.preventDefault();
+      view.viewModel.submit.execute();
+    });
+    insert(_el$2, () => view.bind((v) => v.titleText));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return view.bind((v) => v.state === "loading");
+      },
+      get children() {
+        var _el$3 = _tmpl$31();
+        insert(_el$3, () => view.viewModel.loadingText);
+        return _el$3;
+      }
+    }), _el$5);
+    insert(_el$, createComponent(For, {
+      get each() {
+        return view.bind((v) => v.items.slice());
+      },
+      children: (item) => item.kind === "field" ? createComponent(ViewSelector, {
+        get model() {
+          return item.field;
+        }
+      }) : (() => {
+        var _el$6 = _tmpl$43(), _el$7 = _el$6.firstChild;
+        insert(_el$7, () => item.labelText);
+        insert(_el$6, createComponent(ViewSelector, {
+          get model() {
+            return item.list;
+          }
+        }), null);
+        return _el$6;
+      })()
+    }), _el$5);
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return view.bind((v) => v.errorText);
+      },
+      get children() {
+        var _el$4 = _tmpl$210();
+        insert(_el$4, () => view.bind((v) => v.errorText));
+        return _el$4;
+      }
+    }), _el$5);
+    insert(_el$5, createComponent(ButtonView, {
+      get model() {
+        return view.viewModel.cancel;
+      }
+    }), null);
+    insert(_el$5, createComponent(ButtonView, {
+      get model() {
+        return view.viewModel.submit;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-dynamic-form", ...v.classes].join(" "))));
+    return _el$;
+  }
+}));
+
+// ../../frontend/web/packages/ui/src/views/InfoFieldView.tsx
+var _tmpl$34 = /* @__PURE__ */ template(`<span class=ui-info__text>`);
+var _tmpl$211 = /* @__PURE__ */ template(`<div><span class=ui-info__label>`);
+var InfoFieldView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$211(), _el$2 = _el$.firstChild;
+    insert(_el$2, () => view.bind((v) => v.labelText));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return view.bind((v) => v.valueText !== "");
+      },
+      get children() {
+        var _el$3 = _tmpl$34();
+        insert(_el$3, () => view.bind((v) => v.valueText));
+        return _el$3;
+      }
+    }), null);
+    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-info", ...v.classes].join(" "))));
+    return _el$;
+  }
+}));
+
+// ../../frontend/web/packages/ui/src/views/SwitchFieldView.tsx
+var _tmpl$35 = /* @__PURE__ */ template(`<label><input type=checkbox role=switch><span class=ui-switch__text>`);
+var SwitchFieldView = mvvm.createMvvmView((view) => {
+  const generatedId = createUniqueId();
+  const id = () => view.bind((v) => v.id) || generatedId;
+  return createComponent(Show, {
+    get when() {
+      return view.bind((v) => v.isVisible);
+    },
+    get children() {
+      var _el$ = _tmpl$35(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      _el$2.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.checked));
+      insert(_el$3, () => view.bind((v) => v.labelText));
+      createRenderEffect((_p$) => {
+        var _v$ = view.bind((v) => ["ui-switch", ...v.classes].join(" ")), _v$2 = id(), _v$3 = id(), _v$4 = !view.bind((v) => v.isEnabled);
+        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+        _v$2 !== _p$.t && setAttribute(_el$, "for", _p$.t = _v$2);
+        _v$3 !== _p$.a && setAttribute(_el$2, "id", _p$.a = _v$3);
+        _v$4 !== _p$.o && (_el$2.disabled = _p$.o = _v$4);
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined,
+        a: undefined,
+        o: undefined
+      });
+      createRenderEffect(() => _el$2.checked = view.bind((v) => v.value));
+      return _el$;
+    }
+  });
+});
+
 // ../../frontend/web/packages/ui/src/views/TextFieldView.tsx
-var _tmpl$28 = /* @__PURE__ */ template(`<textarea class=ui-field rows=4>`);
-var _tmpl$29 = /* @__PURE__ */ template(`<div><label class=ui-field-label>`);
-var _tmpl$33 = /* @__PURE__ */ template(`<input class=ui-field autocomplete=off>`);
+var _tmpl$36 = /* @__PURE__ */ template(`<textarea class=ui-field rows=4>`);
+var _tmpl$212 = /* @__PURE__ */ template(`<div><label class=ui-field-label>`);
+var _tmpl$37 = /* @__PURE__ */ template(`<input class=ui-field autocomplete=off>`);
 var TextFieldView = mvvm.createMvvmView((view) => {
   const generatedId = createUniqueId();
   const id = () => view.bind((v) => v.id) || generatedId;
@@ -4990,7 +5268,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$29(), _el$2 = _el$.firstChild;
+      var _el$ = _tmpl$212(), _el$2 = _el$.firstChild;
       insert(_el$2, () => view.bind((v) => v.label));
       insert(_el$, createComponent(Show, {
         get when() {
@@ -4998,7 +5276,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
         },
         get fallback() {
           return (() => {
-            var _el$4 = _tmpl$33();
+            var _el$4 = _tmpl$37();
             _el$4.$$input = (event) => view.viewModel.setValue(event.currentTarget.value);
             createRenderEffect((_p$) => {
               var _v$6 = id(), _v$7 = view.bind((v) => v.placeholder), _v$8 = !view.bind((v) => v.isEnabled);
@@ -5016,7 +5294,7 @@ var TextFieldView = mvvm.createMvvmView((view) => {
           })();
         },
         get children() {
-          var _el$3 = _tmpl$28();
+          var _el$3 = _tmpl$36();
           _el$3.$$input = (event) => view.viewModel.setValue(event.currentTarget.value);
           createRenderEffect((_p$) => {
             var _v$ = id(), _v$2 = view.bind((v) => v.placeholder), _v$3 = !view.bind((v) => v.isEnabled);
@@ -5049,10 +5327,10 @@ var TextFieldView = mvvm.createMvvmView((view) => {
 delegateEvents(["input"]);
 
 // ../../frontend/web/packages/ui/src/views/FormSheetView.tsx
-var _tmpl$30 = /* @__PURE__ */ template(`<div class=ui-sheet__fields>`);
-var _tmpl$210 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
-var _tmpl$34 = /* @__PURE__ */ template(`<div class=ui-sheet__actions>`);
-var _tmpl$43 = /* @__PURE__ */ template(`<dialog class=ui-sheet><form><h2 class=ui-sheet__title>`);
+var _tmpl$38 = /* @__PURE__ */ template(`<div class=ui-sheet__fields>`);
+var _tmpl$213 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
+var _tmpl$39 = /* @__PURE__ */ template(`<div class=ui-sheet__actions>`);
+var _tmpl$44 = /* @__PURE__ */ template(`<dialog class=ui-sheet><form><h2 class=ui-sheet__title>`);
 var _tmpl$53 = /* @__PURE__ */ template(`<p class=ui-sheet__text>`);
 var FormSheetView = mvvm.createMvvmView((view) => {
   let dialog;
@@ -5076,7 +5354,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
       dialog.close();
   });
   return (() => {
-    var _el$ = _tmpl$43(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+    var _el$ = _tmpl$44(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
     _el$.addEventListener("cancel", (event) => {
       event.preventDefault();
       view.viewModel.cancel.execute();
@@ -5104,7 +5382,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
             insert(_el$7, () => remove().text);
             return _el$7;
           })(), (() => {
-            var _el$8 = _tmpl$34();
+            var _el$8 = _tmpl$39();
             insert(_el$8, createComponent(ButtonView, {
               get model() {
                 return remove().cancel;
@@ -5121,7 +5399,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
       },
       get children() {
         return [(() => {
-          var _el$4 = _tmpl$30();
+          var _el$4 = _tmpl$38();
           insert(_el$4, createComponent(For, {
             get each() {
               return view.bind((v) => v.fields.slice());
@@ -5136,12 +5414,12 @@ var FormSheetView = mvvm.createMvvmView((view) => {
             return view.bind((v) => v.errorText);
           },
           get children() {
-            var _el$5 = _tmpl$210();
+            var _el$5 = _tmpl$213();
             insert(_el$5, () => view.bind((v) => v.errorText));
             return _el$5;
           }
         }), (() => {
-          var _el$6 = _tmpl$34();
+          var _el$6 = _tmpl$39();
           insert(_el$6, createComponent(ButtonView, {
             get model() {
               return view.viewModel.cancel;
@@ -5170,7 +5448,7 @@ var FormSheetView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/FilePickerView.tsx
-var _tmpl$31 = /* @__PURE__ */ template(`<label><span></span><input type=file class=ui-visually-hidden>`);
+var _tmpl$40 = /* @__PURE__ */ template(`<label><span></span><input type=file class=ui-visually-hidden>`);
 var FilePickerView = mvvm.createMvvmView((view) => {
   let input;
   const choose = async (files) => {
@@ -5183,7 +5461,7 @@ var FilePickerView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$31(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$40(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$, createComponent(Show, {
         get when() {
           return view.bind((v) => v.icon);
@@ -5219,14 +5497,81 @@ var FilePickerView = mvvm.createMvvmView((view) => {
   });
 });
 
+// ../../frontend/web/packages/ui/src/views/spaceLength.ts
+var SPACE = { none: "0px", small: "var(--ui-space-2)", medium: "var(--ui-space-3)", large: "var(--ui-space-4)" };
+var spaceLength = (space) => typeof space === "number" ? `${space}px` : SPACE[space];
+
+// ../../frontend/web/packages/ui/src/views/GridView.tsx
+var _tmpl$41 = /* @__PURE__ */ template(`<div>`);
+function GridItem(props) {
+  const view = useMvvmView(props.model);
+  return createComponent(Show, {
+    get when() {
+      return view.bind((v) => v.isVisible);
+    },
+    get children() {
+      var _el$ = _tmpl$41();
+      insert(_el$, createComponent(ViewSelector, {
+        get model() {
+          return view.bind((v) => v.content);
+        }
+      }));
+      createRenderEffect((_p$) => {
+        var _v$ = view.bind((v) => ["ui-grid__item", ...v.classes].join(" ")), _v$2 = view.bind((v) => v.span !== undefined && v.span > 1 ? `span ${v.span}` : undefined);
+        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
+        _v$2 !== _p$.t && setStyleProperty(_el$, "grid-column", _p$.t = _v$2);
+        return _p$;
+      }, {
+        e: undefined,
+        t: undefined
+      });
+      return _el$;
+    }
+  });
+}
+var GridView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$2 = _tmpl$41();
+    insert(_el$2, createComponent(For, {
+      get each() {
+        return view.bind((v) => v.items.slice());
+      },
+      children: (item) => createComponent(GridItem, {
+        model: item
+      })
+    }));
+    createRenderEffect((_p$) => {
+      var _v$3 = view.bind((v) => v.id) || undefined, _v$4 = view.bind((v) => ["ui-grid", ...v.classes].join(" ")), _v$5 = view.bind((v) => GridViewModel.template(v.columns)), _v$6 = view.bind((v) => GridViewModel.template(v.rows)), _v$7 = view.bind((v) => spaceLength(v.gap.column ?? "none")), _v$8 = view.bind((v) => spaceLength(v.gap.row ?? "none"));
+      _v$3 !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$3);
+      _v$4 !== _p$.t && className(_el$2, _p$.t = _v$4);
+      _v$5 !== _p$.a && setStyleProperty(_el$2, "--ui-grid-columns", _p$.a = _v$5);
+      _v$6 !== _p$.o && setStyleProperty(_el$2, "--ui-grid-rows", _p$.o = _v$6);
+      _v$7 !== _p$.i && setStyleProperty(_el$2, "--ui-grid-column-gap", _p$.i = _v$7);
+      _v$8 !== _p$.n && setStyleProperty(_el$2, "--ui-grid-row-gap", _p$.n = _v$8);
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined,
+      o: undefined,
+      i: undefined,
+      n: undefined
+    });
+    return _el$2;
+  }
+}));
+
 // ../../frontend/web/packages/ui/src/views/HintView.tsx
-var _tmpl$35 = /* @__PURE__ */ template(`<p>`);
+var _tmpl$45 = /* @__PURE__ */ template(`<p>`);
 var HintView = mvvm.createMvvmView((view) => createComponent(Show, {
   get when() {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$35();
+    var _el$ = _tmpl$45();
     insert(_el$, () => view.bind((v) => v.text));
     createRenderEffect((_p$) => {
       var _v$ = view.bind((v) => v.id) || undefined, _v$2 = view.bind((v) => ["ui-hint", ...v.tone === "error" ? ["ui-hint--error"] : [], ...v.classes].join(" ")), _v$3 = view.bind((v) => v.tone === "error" ? "alert" : undefined);
@@ -5244,8 +5589,8 @@ var HintView = mvvm.createMvvmView((view) => createComponent(Show, {
 }));
 
 // ../../frontend/web/packages/ui/src/views/ImageView.tsx
-var _tmpl$36 = /* @__PURE__ */ template(`<div>`);
-var _tmpl$211 = /* @__PURE__ */ template(`<img alt>`);
+var _tmpl$46 = /* @__PURE__ */ template(`<div>`);
+var _tmpl$214 = /* @__PURE__ */ template(`<img alt>`);
 var ImageView = mvvm.createMvvmView((view) => {
   let current;
   const [url] = createResource(() => view.bind((v) => v.key), async () => {
@@ -5261,7 +5606,7 @@ var ImageView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$36();
+      var _el$ = _tmpl$46();
       insert(_el$, createComponent(Show, {
         get when() {
           return memo(() => !!view.bind((v) => v.hasImage))() && url();
@@ -5274,7 +5619,7 @@ var ImageView = mvvm.createMvvmView((view) => {
           });
         },
         children: (src) => (() => {
-          var _el$2 = _tmpl$211();
+          var _el$2 = _tmpl$214();
           createRenderEffect(() => setAttribute(_el$2, "src", src()));
           return _el$2;
         })()
@@ -5294,10 +5639,10 @@ var ImageView = mvvm.createMvvmView((view) => {
 });
 
 // ../../frontend/web/packages/ui/src/views/PictureView.tsx
-var _tmpl$37 = /* @__PURE__ */ template(`<span class=ui-picture__hint>`);
-var _tmpl$212 = /* @__PURE__ */ template(`<label><input type=file class=ui-visually-hidden>`);
-var _tmpl$38 = /* @__PURE__ */ template(`<button type=button class=ui-picture__open>`);
-var _tmpl$44 = /* @__PURE__ */ template(`<div class=ui-picture__actions>`);
+var _tmpl$47 = /* @__PURE__ */ template(`<span class=ui-picture__hint>`);
+var _tmpl$215 = /* @__PURE__ */ template(`<label><input type=file class=ui-visually-hidden>`);
+var _tmpl$310 = /* @__PURE__ */ template(`<button type=button class=ui-picture__open>`);
+var _tmpl$48 = /* @__PURE__ */ template(`<div class=ui-picture__actions>`);
 var _tmpl$54 = /* @__PURE__ */ template(`<div><dialog class=ui-viewer><div class=ui-viewer__bar></div><div class=ui-viewer__scroll><div class=ui-viewer__stage>`);
 var _tmpl$63 = /* @__PURE__ */ template(`<img alt>`);
 function EmptyHint(props) {
@@ -5306,7 +5651,7 @@ function EmptyHint(props) {
       return props.icon;
     }
   }), (() => {
-    var _el$ = _tmpl$37();
+    var _el$ = _tmpl$47();
     insert(_el$, () => props.text);
     return _el$;
   })()];
@@ -5392,7 +5737,7 @@ var PictureView = mvvm.createMvvmView((view) => {
     return a && b ? Math.hypot(a.x - b.x, a.y - b.y) : 0;
   };
   const filePicker = (cover) => (() => {
-    var _el$2 = _tmpl$212(), _el$3 = _el$2.firstChild;
+    var _el$2 = _tmpl$215(), _el$3 = _el$2.firstChild;
     className(_el$2, cover ? "ui-picture__cover" : "ui-icon-button ui-icon-button--small ui-picture__action");
     insert(_el$2, createComponent(Show, {
       when: !cover,
@@ -5445,7 +5790,7 @@ var PictureView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.hasImage);
         },
         get children() {
-          var _el$5 = _tmpl$38();
+          var _el$5 = _tmpl$310();
           _el$5.$$click = () => view.viewModel.open();
           createRenderEffect((_p$) => {
             var _v$5 = view.bind((v) => v.texts.openTooltipText), _v$6 = view.bind((v) => v.texts.openTooltipText);
@@ -5472,7 +5817,7 @@ var PictureView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.showsActions);
         },
         get children() {
-          var _el$6 = _tmpl$44();
+          var _el$6 = _tmpl$48();
           insert(_el$6, createComponent(Show, {
             get when() {
               return view.bind((v) => v.canPick);
@@ -5587,47 +5932,11 @@ var PictureView = mvvm.createMvvmView((view) => {
 });
 delegateEvents(["click", "dblclick", "pointerdown", "pointermove", "pointerup"]);
 
-// ../../frontend/web/packages/ui/src/views/ViewRegistryContext.tsx
-var ViewRegistryContext = createContext();
-function ViewRegistryProvider(props) {
-  return createComponent(ViewRegistryContext.Provider, {
-    get value() {
-      return props.registry;
-    },
-    get children() {
-      return props.children;
-    }
-  });
-}
-function useViewRegistry() {
-  const registry = useContext(ViewRegistryContext);
-  if (!registry)
-    throw new Error("ViewSelector outside of <ViewRegistryProvider>.");
-  return registry;
-}
-
-// ../../frontend/web/packages/ui/src/views/ViewSelector.tsx
-function ViewSelector(props) {
-  const registry = useViewRegistry();
-  return createComponent(Show, {
-    get when() {
-      return props.model;
-    },
-    keyed: true,
-    children: (model) => createComponent(Dynamic, {
-      get component() {
-        return registry.resolve(model);
-      },
-      model
-    })
-  });
-}
-
 // ../../frontend/web/packages/ui/src/views/ListRowView.tsx
-var _tmpl$39 = /* @__PURE__ */ template(`<span class=ui-list-row__leading>`);
-var _tmpl$213 = /* @__PURE__ */ template(`<span class=ui-list-row__meta>`);
-var _tmpl$310 = /* @__PURE__ */ template(`<span class=ui-list-row__trailing>`);
-var _tmpl$45 = /* @__PURE__ */ template(`<a><span class=ui-list-row__text><span class=ui-list-row__title>`);
+var _tmpl$49 = /* @__PURE__ */ template(`<span class=ui-list-row__leading>`);
+var _tmpl$216 = /* @__PURE__ */ template(`<span class=ui-list-row__meta>`);
+var _tmpl$311 = /* @__PURE__ */ template(`<span class=ui-list-row__trailing>`);
+var _tmpl$410 = /* @__PURE__ */ template(`<a><span class=ui-list-row__text><span class=ui-list-row__title>`);
 function Content(props) {
   return createComponent(Show, {
     get when() {
@@ -5641,7 +5950,7 @@ function Content(props) {
   });
 }
 var ListRowView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$45(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild;
+  var _el$ = _tmpl$410(), _el$3 = _el$.firstChild, _el$4 = _el$3.firstChild;
   _el$.$$click = (event) => {
     if (event.ctrlKey || event.metaKey || event.shiftKey || event.button !== 0)
       return;
@@ -5653,7 +5962,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.leading);
     },
     get children() {
-      var _el$2 = _tmpl$39();
+      var _el$2 = _tmpl$49();
       insert(_el$2, createComponent(Content, {
         get content() {
           return view.bind((v) => v.leading);
@@ -5668,7 +5977,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.meta);
     },
     get children() {
-      var _el$5 = _tmpl$213();
+      var _el$5 = _tmpl$216();
       insert(_el$5, () => view.bind((v) => v.meta));
       return _el$5;
     }
@@ -5678,7 +5987,7 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
       return view.bind((v) => v.trailing);
     },
     get children() {
-      var _el$6 = _tmpl$310();
+      var _el$6 = _tmpl$311();
       insert(_el$6, createComponent(Content, {
         get content() {
           return view.bind((v) => v.trailing);
@@ -5705,10 +6014,10 @@ var ListRowView = mvvm.createMvvmView((view) => (() => {
 delegateEvents(["click"]);
 
 // ../../frontend/web/packages/ui/src/views/ListView.tsx
-var _tmpl$40 = /* @__PURE__ */ template(`<li>`);
-var _tmpl$214 = /* @__PURE__ */ template(`<div class=ui-list-row__controls>`);
-var _tmpl$311 = /* @__PURE__ */ template(`<ul>`);
-var _tmpl$46 = /* @__PURE__ */ template(`<div class=ui-reorderable><div class=ui-reorder-dropline></div><div class=ui-visually-hidden aria-live=polite>`);
+var _tmpl$50 = /* @__PURE__ */ template(`<li>`);
+var _tmpl$217 = /* @__PURE__ */ template(`<div class=ui-list-row__controls>`);
+var _tmpl$312 = /* @__PURE__ */ template(`<ul>`);
+var _tmpl$411 = /* @__PURE__ */ template(`<div class=ui-reorderable><div class=ui-reorder-dropline></div><div class=ui-visually-hidden aria-live=polite>`);
 function ListItem(props) {
   const view = useMvvmView(props.model);
   return createComponent(Show, {
@@ -5716,7 +6025,7 @@ function ListItem(props) {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$40();
+      var _el$ = _tmpl$50();
       insert(_el$, createComponent(ViewSelector, {
         get model() {
           return view.bind((v) => v.content);
@@ -5727,7 +6036,7 @@ function ListItem(props) {
           return view.bind((v) => v.controls);
         },
         children: (controls) => (() => {
-          var _el$2 = _tmpl$214();
+          var _el$2 = _tmpl$217();
           insert(_el$2, createComponent(ViewSelector, {
             get model() {
               return controls();
@@ -5848,7 +6157,7 @@ var ListView = mvvm.createMvvmView((view) => {
     return (index < from ? target.top : target.bottom) - container.getBoundingClientRect().top;
   };
   const list = () => (() => {
-    var _el$3 = _tmpl$311();
+    var _el$3 = _tmpl$312();
     insert(_el$3, createComponent(For, {
       get each() {
         return view.bind((v) => v.items.slice());
@@ -5883,7 +6192,7 @@ var ListView = mvvm.createMvvmView((view) => {
           return list();
         },
         get children() {
-          var _el$4 = _tmpl$46(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
+          var _el$4 = _tmpl$411(), _el$5 = _el$4.firstChild, _el$6 = _el$5.nextSibling;
           var _ref$ = container;
           typeof _ref$ === "function" ? use(_ref$, _el$4) : container = _el$4;
           insert(_el$4, list, _el$5);
@@ -5916,8 +6225,8 @@ function useWideLayout(query = WIDE_LAYOUT_QUERY) {
 }
 
 // ../../frontend/web/packages/ui/src/views/MasterDetailView.tsx
-var _tmpl$41 = /* @__PURE__ */ template(`<div class=ui-master-detail><div class="ui-pane ui-pane--master"></div><div class="ui-pane ui-pane--detail">`);
-var _tmpl$215 = /* @__PURE__ */ template(`<div class=ui-pane>`);
+var _tmpl$51 = /* @__PURE__ */ template(`<div class=ui-master-detail><div class="ui-pane ui-pane--master"></div><div class="ui-pane ui-pane--detail">`);
+var _tmpl$218 = /* @__PURE__ */ template(`<div class=ui-pane>`);
 function MasterDetailView(props) {
   const view = useMvvmView(props.model);
   const wide = useWideLayout();
@@ -5951,20 +6260,20 @@ function MasterDetailView(props) {
         },
         get fallback() {
           return (() => {
-            var _el$5 = _tmpl$215();
+            var _el$5 = _tmpl$218();
             insert(_el$5, master);
             return _el$5;
           })();
         },
         get children() {
-          var _el$4 = _tmpl$215();
+          var _el$4 = _tmpl$218();
           insert(_el$4, detail);
           return _el$4;
         }
       });
     },
     get children() {
-      var _el$ = _tmpl$41(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
+      var _el$ = _tmpl$51(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
       insert(_el$2, master);
       insert(_el$3, (() => {
         var _c$ = memo(() => !!hasDetail());
@@ -5976,13 +6285,13 @@ function MasterDetailView(props) {
 }
 
 // ../../frontend/web/packages/ui/src/views/ProgressBarView.tsx
-var _tmpl$47 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
+var _tmpl$55 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
 var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
   get when() {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$47(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
+    var _el$ = _tmpl$55(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
     insert(_el$4, () => view.bind((v) => v.label));
     createRenderEffect((_p$) => {
       var _v$ = view.bind((v) => ["ui-progress", ...v.classes].join(" ")), _v$2 = view.bind((v) => v.total), _v$3 = view.bind((v) => v.done), _v$4 = view.bind((v) => `ui-progress__fill ui-progress__fill--${v.effectiveTone}`), _v$5 = `${view.bind((v) => v.percent)}%`;
@@ -6004,9 +6313,9 @@ var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
 }));
 
 // ../../frontend/web/packages/ui/src/views/ReorderControlsView.tsx
-var _tmpl$48 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
+var _tmpl$56 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
 var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$48();
+  var _el$ = _tmpl$56();
   insert(_el$, createComponent(ViewSelector, {
     get model() {
       return view.viewModel.layout;
@@ -6017,9 +6326,9 @@ var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
 })());
 
 // ../../frontend/web/packages/ui/src/views/ReorderHandleView.tsx
-var _tmpl$49 = /* @__PURE__ */ template(`<button type=button>`);
+var _tmpl$57 = /* @__PURE__ */ template(`<button type=button>`);
 var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$49();
+  var _el$ = _tmpl$57();
   _el$.$$pointerdown = (event) => {
     if (event.button !== 0)
       return;
@@ -6043,11 +6352,11 @@ var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
 delegateEvents(["pointerdown"]);
 
 // ../../frontend/web/packages/ui/src/views/SearchView.tsx
-var _tmpl$50 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
-var _tmpl$216 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
-var _tmpl$312 = /* @__PURE__ */ template(`<div class=ui-search__dropdown><ul class=ui-search__results role=listbox>`);
-var _tmpl$410 = /* @__PURE__ */ template(`<div><div class=ui-search__field><input class=ui-search__input type=search role=combobox autocomplete=off>`);
-var _tmpl$55 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
+var _tmpl$58 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
+var _tmpl$219 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
+var _tmpl$313 = /* @__PURE__ */ template(`<div class=ui-search__dropdown><ul class=ui-search__results role=listbox>`);
+var _tmpl$412 = /* @__PURE__ */ template(`<div><div class=ui-search__field><input class=ui-search__input type=search role=combobox autocomplete=off>`);
+var _tmpl$59 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
 var _tmpl$64 = /* @__PURE__ */ template(`<li class=ui-search__result role=option><span class=ui-search__title>`);
 var _tmpl$73 = /* @__PURE__ */ template(`<mark>`);
 var SearchView = mvvm.createMvvmView((view) => {
@@ -6075,7 +6384,7 @@ var SearchView = mvvm.createMvvmView((view) => {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$410(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
+      var _el$ = _tmpl$412(), _el$2 = _el$.firstChild, _el$3 = _el$2.firstChild;
       insert(_el$2, createComponent(UiIcon, {
         name: "search"
       }), _el$3);
@@ -6086,7 +6395,7 @@ var SearchView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.query !== "");
         },
         get children() {
-          var _el$4 = _tmpl$50();
+          var _el$4 = _tmpl$58();
           _el$4.$$click = () => view.viewModel.clear();
           insert(_el$4, createComponent(UiIcon, {
             name: "close"
@@ -6100,14 +6409,14 @@ var SearchView = mvvm.createMvvmView((view) => {
           return hasDropdown();
         },
         get children() {
-          var _el$5 = _tmpl$312(), _el$7 = _el$5.firstChild;
+          var _el$5 = _tmpl$313(), _el$7 = _el$5.firstChild;
           _el$5.$$mousedown = (event) => event.preventDefault();
           insert(_el$5, createComponent(Show, {
             get when() {
               return view.bind((v) => v.hint);
             },
             get children() {
-              var _el$6 = _tmpl$216();
+              var _el$6 = _tmpl$219();
               insert(_el$6, () => view.bind((v) => v.hint));
               return _el$6;
             }
@@ -6134,7 +6443,7 @@ var SearchView = mvvm.createMvvmView((view) => {
                   return row.meta;
                 },
                 get children() {
-                  var _el$0 = _tmpl$55();
+                  var _el$0 = _tmpl$59();
                   insert(_el$0, () => row.meta);
                   return _el$0;
                 }
@@ -6186,14 +6495,7 @@ var SearchView = mvvm.createMvvmView((view) => {
 delegateEvents(["input", "keydown", "click", "mousedown"]);
 
 // ../../frontend/web/packages/ui/src/views/StackView.tsx
-var _tmpl$51 = /* @__PURE__ */ template(`<div>`);
-var SPACE = {
-  none: "0px",
-  small: "var(--ui-space-2)",
-  medium: "var(--ui-space-3)",
-  large: "var(--ui-space-4)"
-};
-var length = (space) => typeof space === "number" ? `${space}px` : SPACE[space];
+var _tmpl$60 = /* @__PURE__ */ template(`<div>`);
 function StackItem(props) {
   const view = useMvvmView(props.model);
   return createComponent(Show, {
@@ -6201,7 +6503,7 @@ function StackItem(props) {
       return view.bind((v) => v.isVisible);
     },
     get children() {
-      var _el$ = _tmpl$51();
+      var _el$ = _tmpl$60();
       insert(_el$, createComponent(ViewSelector, {
         get model() {
           return view.bind((v) => v.content);
@@ -6225,7 +6527,7 @@ var StackView = mvvm.createMvvmView((view) => createComponent(Show, {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$2 = _tmpl$51();
+    var _el$2 = _tmpl$60();
     insert(_el$2, createComponent(For, {
       get each() {
         return view.bind((v) => v.items.slice());
@@ -6235,7 +6537,7 @@ var StackView = mvvm.createMvvmView((view) => createComponent(Show, {
       })
     }));
     createRenderEffect((_p$) => {
-      var _v$3 = view.bind((v) => v.id) || undefined, _v$4 = view.bind((v) => ["ui-stack", `ui-stack--${v.orientation}`, ...v.wraps ? ["ui-stack--wrap"] : [], ...v.classes].join(" ")), _v$5 = view.bind((v) => length(v.gap)), _v$6 = view.bind((v) => length(v.padding)), _v$7 = view.bind((v) => v.alignItems === "start" || v.alignItems === "end" ? `flex-${v.alignItems}` : v.alignItems);
+      var _v$3 = view.bind((v) => v.id) || undefined, _v$4 = view.bind((v) => ["ui-stack", `ui-stack--${v.orientation}`, ...v.wraps ? ["ui-stack--wrap"] : [], ...v.classes].join(" ")), _v$5 = view.bind((v) => spaceLength(v.gap)), _v$6 = view.bind((v) => spaceLength(v.padding)), _v$7 = view.bind((v) => v.alignItems === "start" || v.alignItems === "end" ? `flex-${v.alignItems}` : v.alignItems);
       _v$3 !== _p$.e && setAttribute(_el$2, "id", _p$.e = _v$3);
       _v$4 !== _p$.t && className(_el$2, _p$.t = _v$4);
       _v$5 !== _p$.a && setStyleProperty(_el$2, "--ui-stack-gap", _p$.a = _v$5);
@@ -6253,17 +6555,39 @@ var StackView = mvvm.createMvvmView((view) => createComponent(Show, {
   }
 }));
 
+// ../../frontend/web/packages/ui/src/views/TextView.tsx
+var _tmpl$61 = /* @__PURE__ */ template(`<span>`);
+var TextView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$61();
+    insert(_el$, () => view.bind((v) => v.text));
+    createRenderEffect((_p$) => {
+      var _v$ = view.bind((v) => v.id) || undefined, _v$2 = view.bind((v) => ["ui-text", v.tone === "muted" ? "ui-text--muted" : "", `ui-text--${v.cutOff}`, ...v.classes].filter(Boolean).join(" "));
+      _v$ !== _p$.e && setAttribute(_el$, "id", _p$.e = _v$);
+      _v$2 !== _p$.t && className(_el$, _p$.t = _v$2);
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined
+    });
+    return _el$;
+  }
+}));
+
 // ../../frontend/web/packages/ui/src/views/ToasterView.tsx
-var _tmpl$56 = /* @__PURE__ */ template(`<div class=ui-toast>`);
-var _tmpl$217 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
+var _tmpl$65 = /* @__PURE__ */ template(`<div class=ui-toast>`);
+var _tmpl$220 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
 var ToasterView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$217();
+  var _el$ = _tmpl$220();
   insert(_el$, createComponent(Show, {
     get when() {
       return view.bind((v) => v.message);
     },
     get children() {
-      var _el$2 = _tmpl$56();
+      var _el$2 = _tmpl$65();
       insert(_el$2, () => view.bind((v) => v.message));
       return _el$2;
     }
@@ -6296,209 +6620,8 @@ class ViewRegistry {
 
 // ../../frontend/web/packages/ui/src/views/createUiViewRegistry.ts
 function createUiViewRegistry() {
-  return new ViewRegistry().register(ActionBarViewModel, ActionBarView).register(AppBarViewModel, AppBarView).register(ButtonViewModel, ButtonView).register(ConfirmSheetViewModel, ConfirmSheetView).register(FormSheetViewModel, FormSheetView).register(FilePickerViewModel, FilePickerView).register(HintViewModel, HintView).register(ImageViewModel, ImageView).register(PictureViewModel, PictureView).register(ListRowViewModel, ListRowView).register(ListViewModel, ListView).register(MasterDetailViewModel, MasterDetailView).register(ProgressBarViewModel, ProgressBarView).register(ReorderControlsViewModel, ReorderControlsView).register(ReorderHandleViewModel, ReorderHandleView).register(SearchViewModel, SearchView).register(StackViewModel, StackView).register(TextFieldViewModel, TextFieldView).register(ToasterViewModel, ToasterView);
+  return new ViewRegistry().register(ActionBarViewModel, ActionBarView).register(AppBarViewModel, AppBarView).register(ButtonViewModel, ButtonView).register(ConfirmSheetViewModel, ConfirmSheetView).register(DropdownFieldViewModel, DropdownFieldView).register(DynamicFormRowViewModel, DynamicFormRowView).register(DynamicFormViewModel, DynamicFormView).register(InfoFieldViewModel, InfoFieldView).register(SwitchFieldViewModel, SwitchFieldView).register(FormSheetViewModel, FormSheetView).register(FilePickerViewModel, FilePickerView).register(GridViewModel, GridView).register(HintViewModel, HintView).register(ImageViewModel, ImageView).register(PictureViewModel, PictureView).register(ListRowViewModel, ListRowView).register(ListViewModel, ListView).register(MasterDetailViewModel, MasterDetailView).register(ProgressBarViewModel, ProgressBarView).register(ReorderControlsViewModel, ReorderControlsView).register(ReorderHandleViewModel, ReorderHandleView).register(SearchViewModel, SearchView).register(StackViewModel, StackView).register(TextFieldViewModel, TextFieldView).register(TextViewModel, TextView).register(ToasterViewModel, ToasterView);
 }
-// ../../frontend/web/packages/ui/src/views/DropdownFieldView.tsx
-var _tmpl$57 = /* @__PURE__ */ template(`<div><label class=ui-field-label></label><select class=ui-field>`);
-var _tmpl$218 = /* @__PURE__ */ template(`<option>`);
-var DropdownFieldView = mvvm.createMvvmView((view) => {
-  const generatedId = createUniqueId();
-  const id = () => view.bind((v) => v.id) || generatedId;
-  return createComponent(Show, {
-    get when() {
-      return view.bind((v) => v.isVisible);
-    },
-    get children() {
-      var _el$ = _tmpl$57(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-      insert(_el$2, () => view.bind((v) => v.labelText));
-      _el$3.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.value));
-      insert(_el$3, createComponent(For, {
-        get each() {
-          return view.bind((v) => v.options.slice());
-        },
-        children: (option) => (() => {
-          var _el$4 = _tmpl$218();
-          _el$4.value = option;
-          insert(_el$4, option);
-          createRenderEffect(() => _el$4.selected = view.bind((v) => v.value === option));
-          return _el$4;
-        })()
-      }));
-      createRenderEffect((_p$) => {
-        var _v$ = view.bind((v) => ["ui-text-field", ...v.classes].join(" ")), _v$2 = id(), _v$3 = id(), _v$4 = !view.bind((v) => v.isEnabled);
-        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-        _v$2 !== _p$.t && setAttribute(_el$2, "for", _p$.t = _v$2);
-        _v$3 !== _p$.a && setAttribute(_el$3, "id", _p$.a = _v$3);
-        _v$4 !== _p$.o && (_el$3.disabled = _p$.o = _v$4);
-        return _p$;
-      }, {
-        e: undefined,
-        t: undefined,
-        a: undefined,
-        o: undefined
-      });
-      return _el$;
-    }
-  });
-});
-// ../../frontend/web/packages/ui/src/views/InfoFieldView.tsx
-var _tmpl$58 = /* @__PURE__ */ template(`<span class=ui-info__text>`);
-var _tmpl$219 = /* @__PURE__ */ template(`<div><span class=ui-info__label>`);
-var InfoFieldView = mvvm.createMvvmView((view) => createComponent(Show, {
-  get when() {
-    return view.bind((v) => v.isVisible);
-  },
-  get children() {
-    var _el$ = _tmpl$219(), _el$2 = _el$.firstChild;
-    insert(_el$2, () => view.bind((v) => v.labelText));
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return view.bind((v) => v.valueText !== "");
-      },
-      get children() {
-        var _el$3 = _tmpl$58();
-        insert(_el$3, () => view.bind((v) => v.valueText));
-        return _el$3;
-      }
-    }), null);
-    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-info", ...v.classes].join(" "))));
-    return _el$;
-  }
-}));
-
-// ../../frontend/web/packages/ui/src/views/SwitchFieldView.tsx
-var _tmpl$59 = /* @__PURE__ */ template(`<label><input type=checkbox role=switch><span class=ui-switch__text>`);
-var SwitchFieldView = mvvm.createMvvmView((view) => {
-  const generatedId = createUniqueId();
-  const id = () => view.bind((v) => v.id) || generatedId;
-  return createComponent(Show, {
-    get when() {
-      return view.bind((v) => v.isVisible);
-    },
-    get children() {
-      var _el$ = _tmpl$59(), _el$2 = _el$.firstChild, _el$3 = _el$2.nextSibling;
-      _el$2.addEventListener("change", (event) => view.viewModel.setValue(event.currentTarget.checked));
-      insert(_el$3, () => view.bind((v) => v.labelText));
-      createRenderEffect((_p$) => {
-        var _v$ = view.bind((v) => ["ui-switch", ...v.classes].join(" ")), _v$2 = id(), _v$3 = id(), _v$4 = !view.bind((v) => v.isEnabled);
-        _v$ !== _p$.e && className(_el$, _p$.e = _v$);
-        _v$2 !== _p$.t && setAttribute(_el$, "for", _p$.t = _v$2);
-        _v$3 !== _p$.a && setAttribute(_el$2, "id", _p$.a = _v$3);
-        _v$4 !== _p$.o && (_el$2.disabled = _p$.o = _v$4);
-        return _p$;
-      }, {
-        e: undefined,
-        t: undefined,
-        a: undefined,
-        o: undefined
-      });
-      createRenderEffect(() => _el$2.checked = view.bind((v) => v.value));
-      return _el$;
-    }
-  });
-});
-
-// ../../frontend/web/packages/ui/src/views/DynamicFormView.tsx
-var _tmpl$60 = /* @__PURE__ */ template(`<p class=ui-dynamic-form__loading>`);
-var _tmpl$220 = /* @__PURE__ */ template(`<p class=ui-sheet__error role=alert>`);
-var _tmpl$313 = /* @__PURE__ */ template(`<form><h2 class=ui-dynamic-form__title></h2><div class=ui-sheet__actions>`);
-var _tmpl$411 = /* @__PURE__ */ template(`<section class=ui-dynamic-form__rows><h3 class=ui-dynamic-form__rows-title>`);
-var _tmpl$510 = /* @__PURE__ */ template(`<fieldset class=ui-dynamic-form__row><legend class=ui-dynamic-form__row-title>`);
-function FieldView(props) {
-  const field = props.field;
-  if (field instanceof DropdownFieldViewModel)
-    return createComponent(DropdownFieldView, {
-      model: field
-    });
-  if (field instanceof SwitchFieldViewModel)
-    return createComponent(SwitchFieldView, {
-      model: field
-    });
-  if (field instanceof InfoFieldViewModel)
-    return createComponent(InfoFieldView, {
-      model: field
-    });
-  return createComponent(TextFieldView, {
-    model: field
-  });
-}
-var DynamicFormView = mvvm.createMvvmView((view) => createComponent(Show, {
-  get when() {
-    return view.bind((v) => v.isVisible);
-  },
-  get children() {
-    var _el$ = _tmpl$313(), _el$2 = _el$.firstChild, _el$5 = _el$2.nextSibling;
-    _el$.addEventListener("submit", (event) => {
-      event.preventDefault();
-      view.viewModel.submit.execute();
-    });
-    insert(_el$2, () => view.bind((v) => v.titleText));
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return view.bind((v) => v.state === "loading");
-      },
-      get children() {
-        var _el$3 = _tmpl$60();
-        insert(_el$3, () => view.viewModel.loadingText);
-        return _el$3;
-      }
-    }), _el$5);
-    insert(_el$, createComponent(For, {
-      get each() {
-        return view.bind((v) => v.items.slice());
-      },
-      children: (item) => item.kind === "field" ? createComponent(FieldView, {
-        get field() {
-          return item.field;
-        }
-      }) : (() => {
-        var _el$6 = _tmpl$411(), _el$7 = _el$6.firstChild;
-        insert(_el$7, () => item.labelText);
-        insert(_el$6, createComponent(For, {
-          get each() {
-            return item.rows;
-          },
-          children: (row) => (() => {
-            var _el$8 = _tmpl$510(), _el$9 = _el$8.firstChild;
-            insert(_el$9, () => row.labelText);
-            insert(_el$8, createComponent(For, {
-              get each() {
-                return row.fields;
-              },
-              children: (field) => createComponent(FieldView, {
-                field
-              })
-            }), null);
-            return _el$8;
-          })()
-        }), null);
-        return _el$6;
-      })()
-    }), _el$5);
-    insert(_el$, createComponent(Show, {
-      get when() {
-        return view.bind((v) => v.errorText);
-      },
-      get children() {
-        var _el$4 = _tmpl$220();
-        insert(_el$4, () => view.bind((v) => v.errorText));
-        return _el$4;
-      }
-    }), _el$5);
-    insert(_el$5, createComponent(ButtonView, {
-      get model() {
-        return view.viewModel.cancel;
-      }
-    }), null);
-    insert(_el$5, createComponent(ButtonView, {
-      get model() {
-        return view.viewModel.submit;
-      }
-    }), null);
-    createRenderEffect(() => className(_el$, view.bind((v) => ["ui-dynamic-form", ...v.classes].join(" "))));
-    return _el$;
-  }
-}));
 // ../../frontend/web/packages/formpage/resources/texts.de.json
 var texts_de_default = {
   submitText: "Speichern",
@@ -6720,6 +6843,13 @@ class TelegramMiniAppApi {
       throw new Error("This page works only when it is opened from Telegram: the Telegram script (telegram-web-app.js) did not give a Mini App object.");
     return new TelegramMiniAppApi(webApp);
   }
+  applyTheme(root) {
+    const { colorScheme, themeParams } = this.webApp;
+    if (colorScheme === "light" || colorScheme === "dark")
+      root.setAttribute("data-theme", colorScheme);
+    if (themeParams !== undefined && Object.keys(themeParams).length > 0)
+      root.setAttribute("data-telegram-theme", "");
+  }
   ready() {
     this.webApp.ready();
   }
@@ -6736,10 +6866,11 @@ class TelegramMiniAppApi {
 
 // ../../frontend/web/packages/formpage/src/index.ts
 var telegram = TelegramMiniAppApi.fromWindow(window);
+telegram.applyTheme(document.documentElement);
 var request = new HashFormRequestApi(location.hash);
 var form = new DynamicFormViewModel(new HashFormSource(request), new TelegramFormTarget(request, telegram, () => Date.now()), texts_de_default);
 var page = new StackViewModel({ padding: "large", items: [StackViewModel.item(form)] });
-var registry = createUiViewRegistry().register(DynamicFormViewModel, DynamicFormView);
+var registry = createUiViewRegistry();
 render(() => createComponent(ViewRegistryProvider, { registry, get children() {
   return createComponent(StackView, { model: page });
 } }), document.getElementById("app"));
