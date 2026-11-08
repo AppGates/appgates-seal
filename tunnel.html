@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://*.devtunnels.ms; frame-src 'self' about:; base-uri 'none'; form-action 'none'">
+<title>Tunnel</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1b1f24; --bg: #ffffff; --muted: #57606a; --line: #d0d7de; --accent: #0969da; --bad: #cf222e; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #9da7b3; --line: #30363d; --accent: #4493f8; --bad: #f85149; } }
+  body { margin: 0; padding: 16px; font: 16px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  p { margin: 8px 0; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .bad { color: var(--bad); }
+  label { display: block; margin: 12px 0 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { margin-top: 16px; padding: 10px 16px; font: inherit; border: 0; border-radius: 6px; background: var(--accent); color: #fff; }
+  iframe { width: 100%; height: 75vh; border: 1px solid var(--line); border-radius: 6px; background: #fff; }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Tunnel</h1>
+<p id="status">Einen Moment …</p>
+<form id="enrol" hidden>
+  <p>Dieses Gerät ist noch nicht eingetragen. Ein Schlüssel wird nur auf diesem Gerät angelegt und verlässt es nie.</p>
+  <label for="code">Code aus deiner Authenticator-App</label>
+  <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+  <label for="token">Einmal-Token vom PC <span class="muted">(nur für ein weiteres oder neues Gerät, sonst leer lassen)</span></label>
+  <input id="token" autocomplete="off">
+  <button type="submit">Eintragen</button>
+</form>
+<iframe id="view" hidden sandbox title="Seite hinter dem Tunnel"></iframe>
+<script>
+"use strict";
+// The page of the private tunnel (T354). Line 1: the token of the tunnel service (in the part after "#", never sent to GitHub). Line 2: a key of this device that cannot be exported; the machine
+// sends a challenge, the page signs it, only then is there a session. No text of the address or of the machine is put into this page as HTML; the answer of the machine is shown in a sandboxed frame
+// (no scripts, an origin of its own), so nothing of it can reach the key.
+const PURPOSE = "appgates-device-proof-v1";
+const status = document.getElementById("status");
+const say = (text, bad = false) => { status.textContent = text; status.className = bad ? "bad" : ""; };
+
+const fragment = new URLSearchParams(location.hash.slice(1));
+const tunnel = fragment.get("u");
+const token = fragment.get("t");
+// the token must not stay in the address bar or in the history of the browser
+history.replaceState(null, "", location.pathname);
+
+const insideTelegram = typeof window.TelegramWebviewProxy !== "undefined" || /Telegram/i.test(navigator.userAgent);
+
+function database() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("appgates-device", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("keys");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function stored(write) {
+  const db = await database();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction("keys", write === undefined ? "readonly" : "readwrite");
+    const keys = transaction.objectStore("keys");
+    const request = write === undefined ? keys.get("device") : keys.put(write, "device");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function call(path, init = {}) {
+  const headers = { "x-tunnel-authorization": `tunnel ${token}`, ...(init.headers || {}) };
+  return fetch(`${tunnel}${path}`, { ...init, headers, credentials: "omit", cache: "no-store", redirect: "error" });
+}
+
+async function prove(pair) {
+  const challenge = await (await call("/__device/challenge")).json();
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(`${PURPOSE}:${challenge.nonce}`)));
+  const base64url = btoa(String.fromCharCode(...signature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const answer = await call("/__device/prove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challengeId: challenge.id, signature: base64url }) });
+  if (answer.status === 403) return { refused: true, enrol: (await answer.json()).enrol === true };
+  if (!answer.ok) throw new Error(`Der PC hat den Nachweis mit ${answer.status} beantwortet.`);
+  return { session: (await answer.json()).token };
+}
+
+async function show(session) {
+  const answer = await call("/", { headers: { "x-device-session": session } });
+  if (!answer.ok) throw new Error(`Die Seite hinter dem Tunnel hat mit ${answer.status} geantwortet.`);
+  const view = document.getElementById("view");
+  view.srcdoc = await answer.text();
+  view.hidden = false;
+  say("Verbunden, nur dieses Gerät.");
+}
+
+function enrolForm() {
+  const form = document.getElementById("enrol");
+  form.hidden = false;
+  say("Gerät eintragen");
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const code = document.getElementById("code").value.trim();
+    const enrolmentToken = document.getElementById("token").value.trim();
+    try {
+      // the private part cannot be exported: it stays in this browser and can only sign
+      const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+      const jwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+      const key = { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
+      const answer = await call("/__device/enrol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, code, ...(enrolmentToken ? { enrolmentToken } : {}) }) });
+      if (!answer.ok) {
+        say(answer.status === 403 ? "Nicht eingetragen: der Code stimmt nicht, oder für dieses Konto gibt es schon ein Gerät (dann nur mit einem Einmal-Token vom PC)." : `Nicht eingetragen (Antwort ${answer.status}).`, true);
+        return;
+      }
+      await stored(pair);
+      form.hidden = true;
+      await start();
+    } catch (error) {
+      say(`Fehler beim Eintragen: ${error && error.message ? error.message : error}`, true);
+    }
+  };
+}
+
+async function start() {
+  if (!tunnel || !token || !/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.devtunnels\.ms(:\d+)?$/i.test(tunnel)) return say("Dieser Link ist unvollständig. Öffne ihn mit dem Knopf aus dem Chat des Bots.", true);
+  if (insideTelegram) return say("Diese Seite ist in Telegram geöffnet. Öffne sie im Browser deines Handys (in Telegram den In-App-Browser ausschalten oder im Menü „Im Browser öffnen“). In Telegram wird kein Schlüssel angelegt.", true);
+  const pair = await stored();
+  if (!pair) return enrolForm();
+  const result = await prove(pair);
+  if (result.refused) return result.enrol ? enrolForm() : say("Der PC kennt dieses Gerät nicht (ein anderes Gerät ist eingetragen).", true);
+  await show(result.session);
+}
+
+start().catch((error) => say(`Fehler: ${error && error.message ? error.message : error}`, true));
+</script>
+</body>
+</html>
