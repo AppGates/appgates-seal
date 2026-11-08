@@ -954,3 +954,18 @@ html.ui-dragging, html.ui-dragging * {
 .ui-button, .ui-icon-button, .ui-field, .ui-field-label, .ui-hint, .ui-app-bar, .ui-action-bar, .ui-list, .ui-progress, .ui-toast, .ui-sheet {
   font-family: var(--ui-font);
 }
+
+/* ../../frontend/web/packages/formpage/src/theme.css */
+:root {
+  --ui-color-ink: var(--tg-theme-text-color, #1a2326);
+  --ui-color-muted: color-mix(in srgb, var(--ui-color-ink) 75%, var(--tg-theme-bg-color, #fff));
+  --ui-color-surface: var(--tg-theme-secondary-bg-color, #fff);
+  --ui-color-line: #80808073;
+  --ui-color-accent: var(--tg-theme-button-color, #1f6feb);
+  --ui-color-on-accent: var(--tg-theme-button-text-color, #fff);
+}
+
+body {
+  background: var(--tg-theme-bg-color, #fff);
+  color: var(--ui-color-ink);
+}
