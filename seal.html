@@ -111,6 +111,11 @@ function newTotpSecret() {
 function totpUri(secret) {
   return "otpauth://totp/AppGates%20bot:Owner?secret=" + secret + "&issuer=AppGates%20bot&algorithm=SHA1&digits=6&period=30";
 }
+// Whether the page runs inside the web view of Telegram (a Mini App, or the browser of the Telegram app). The setup of the authenticator shows the secret and must not run there (T359, owner 2026-11-09):
+// the app that hosts the web view can read the page. It has to be opened in the browser of the phone.
+function insideTelegram(hash, userAgent, hasProxy) {
+  return String(hash || "").includes("tgWebApp") || Boolean(hasProxy) || /Telegram/i.test(String(userAgent || ""));
+}
 // Layout of the result: RSA-OAEP(SHA-256) wrapped AES key | 12 byte IV | AES-GCM(JSON {n: name, v: value, t: time, h?: hint, k?: place}); base64url.
 async function seal(publicKey, name, value, now, extra) {
   const rsa = await crypto.subtle.importKey("spki", fromBase64Url(publicKey), { name: "RSA-OAEP", hash: "SHA-256" }, false, ["encrypt"]);
@@ -194,9 +199,13 @@ element("send").addEventListener("click", async () => {
 // The setup of the authenticator (T359, `?m=totp`): no value to type. The page makes the secret, shows it for the app, and seals it for the bot only when the person says it is entered; the name is reserved.
 if (new URLSearchParams(location.search).get("m") === "totp") {
   for (const id of ["value", "send", "nameInput", "hint", "places"]) element(id).hidden = true;
-  element("totp").hidden = false;
+  const hosted = insideTelegram(location.hash, navigator.userAgent, typeof window.TelegramWebviewProxy !== "undefined");
+  // inside Telegram nothing is made and nothing is shown: the person is told to open the link in the browser of the phone
+  if (hosted) say("Diese Seite ist in Telegram geöffnet. Öffne den Link im Browser deines Handys (in Telegram die Einstellung, Links extern zu öffnen). Hier erzeuge ich kein Geheimnis.", "bad");
+  else element("totp").hidden = false;
   let secret = "";
   element("totpMake").addEventListener("click", () => {
+    if (hosted) return;
     secret = newTotpSecret();
     element("totpSecret").value = secret;
     element("totpLink").href = totpUri(secret);
@@ -204,17 +213,10 @@ if (new URLSearchParams(location.search).get("m") === "totp") {
     element("totpMake").hidden = true;
   });
   element("totpSend").addEventListener("click", async () => {
-    if (!secret || !config.key) return say("Es gibt noch kein Geheimnis oder keinen Schlüssel.", "bad");
+    if (hosted || !secret || !config.key) return say("Es gibt noch kein Geheimnis oder keinen Schlüssel.", "bad");
     try {
+      // the only way back is the sealed text that the person pastes into the chat: nothing here hands the secret to Telegram
       const sealed = await seal(config.key, "TOTP_SETUP", secret, Date.now(), {});
-      if (inTelegram && window.Telegram && window.Telegram.WebApp) {
-        const data = answerOf(config.request, sealed);
-        if (!fitsTelegram(data)) return say("Zu lang für Telegram (höchstens 4096 Bytes).", "bad");
-        element("totpSecret").value = "";
-        secret = "";
-        window.Telegram.WebApp.sendData(data);
-        return say("Gesendet. Schicke dem Bot jetzt den Code deiner App.", "ok");
-      }
       element("result").value = "/setenv TOTP_SETUP enc:" + sealed;
       element("result").hidden = false;
       element("copy").hidden = false;
