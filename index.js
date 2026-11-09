@@ -3299,10 +3299,10 @@ class ListViewModel extends WebViewModel {
     const [moved] = next.splice(from, 1);
     next.splice(target, 0, moved);
     this.items = next;
-    this.announcement = options.announce(moved, target + 1, next.length);
     const run = this._queue.then(async () => {
       try {
         await options.move(key, target);
+        this.announcement = options.announce(moved, target + 1, next.length);
       } catch (error) {
         this.items = before;
         options.onError?.(error);
