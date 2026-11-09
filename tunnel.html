@@ -92,39 +92,83 @@ async function prove(pair) {
   return { session: (await answer.json()).token };
 }
 
-async function show(session) {
-  const answer = await call("/", { headers: { "x-device-session": session } });
+// The proven device and its session. A session lasts ten minutes: a request that is refused (401) proves the key again and is repeated once.
+let device;
+async function authed(path, init = {}) {
+  const attempt = () => call(path, { ...init, headers: { ...(init.headers || {}), "x-device-session": device.session } });
+  let answer = await attempt();
+  if (answer.status === 401) {
+    const renewed = await prove(device.pair);
+    if (renewed.session) {
+      device.session = renewed.session;
+      answer = await attempt();
+    }
+  }
+  return answer;
+}
+
+// What the frame shows now: the text of the page of the site, so that a change can be seen.
+let shown = "";
+async function show() {
+  const answer = await authed("/");
   if (!answer.ok) throw new Error(`Die Seite hinter dem Tunnel hat mit ${answer.status} geantwortet.`);
+  shown = await answer.text();
   const view = document.getElementById("view");
-  view.srcdoc = await answer.text();
+  view.srcdoc = shown;
   view.hidden = false;
   say("Verbunden, nur dieses Gerät.");
 }
 
-// While the page is open it says every 30 seconds that it is, so that the bot does not end the tunnel (T361); the gate answers only for a valid session. A session lasts ten minutes, so a refused
-// signal first proves the key again for a new one. When that fails too, or the tunnel does not answer, the person is told and the signals stop.
+// Reload by itself (T362, owner 2026-11-09: no reload button; the dev server is bound at the backend of the tunnel, the website knows nothing of it): the gate on the machine hears from the dev server when it has
+// built and raises a version. This request is held by the gate until the version is higher (at most 25 seconds) and is asked again at once. On a higher version the page of the site is fetched again and put into
+// the frame. While nothing changes there is one short request every 25 seconds in the tunnel.
+let version = null;
+let stopped = false;
+let run = 0; // the number of the current run of the loop: an older loop (the page started again after the enrolment) ends by itself
+async function reloadFrame() {
+  const answer = await authed("/");
+  if (!answer.ok) throw new Error("answer " + answer.status);
+  const text = await answer.text();
+  if (text === shown) return;
+  shown = text;
+  document.getElementById("view").srcdoc = text;
+}
+async function watchChanges(generation) {
+  while (!stopped && generation === run) {
+    const answer = await authed(version === null ? "/__device/changes" : `/__device/changes?since=${version}`);
+    if (!answer.ok) throw new Error("answer " + answer.status);
+    const next = (await answer.json()).version;
+    if (stopped || generation !== run) return;
+    if (version !== null && next > version) await reloadFrame();
+    version = next;
+  }
+}
+
+// While the page is open it says every 30 seconds that it is, so that the bot does not end the tunnel (T361); the gate answers only for a valid session. The reload check runs beside it. When a request fails
+// for good (the tunnel is gone, the key is not accepted any more), the person is told and everything stops.
 const HEARTBEAT_MS = 30_000;
-let heartbeat;
-function keepAlive(pair, first) {
-  let session = first;
-  const signal = () => call("/__device/alive", { headers: { "x-device-session": session } });
-  clearInterval(heartbeat);
-  heartbeat = setInterval(async () => {
-    try {
-      let answer = await signal();
-      if (answer.status === 401) {
-        const renewed = await prove(pair);
-        if (renewed.session) {
-          session = renewed.session;
-          answer = await signal();
-        }
+let timers = [];
+function keepGoing() {
+  timers.forEach(clearInterval);
+  stopped = false;
+  version = null;
+  const stop = () => {
+    stopped = true;
+    timers.forEach(clearInterval);
+    timers = [];
+    say("Der Tunnel ist beendet oder nicht erreichbar. Öffne ihn mit dem Knopf aus dem Chat neu.", true);
+  };
+  timers = [
+    setInterval(async () => {
+      try {
+        const answer = await authed("/__device/alive");
+        if (!answer.ok) throw new Error("answer " + answer.status);
+      } catch (error) {
+        stop();
       }
-      if (!answer.ok) throw new Error("answer " + answer.status);
-    } catch (error) {
-      clearInterval(heartbeat);
-      say("Der Tunnel ist beendet oder nicht erreichbar. Öffne ihn mit dem Knopf aus dem Chat neu.", true);
-    }
-  }, HEARTBEAT_MS);
+    }, HEARTBEAT_MS),
+  ];
+  watchChanges(++run).catch(stop);
 }
 
 function enrolForm() {
@@ -161,8 +205,9 @@ async function start() {
   if (!pair) return enrolForm();
   const result = await prove(pair);
   if (result.refused) return result.enrol ? enrolForm() : say("Der PC kennt dieses Gerät nicht (ein anderes Gerät ist eingetragen).", true);
-  await show(result.session);
-  keepAlive(pair, result.session);
+  device = { pair, session: result.session };
+  await show();
+  keepGoing();
 }
 
 start().catch((error) => say(`Fehler: ${error && error.message ? error.message : error}`, true));
