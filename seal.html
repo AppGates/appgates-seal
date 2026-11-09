@@ -36,6 +36,16 @@
   <label id="placePermanent" hidden><input type="radio" name="place" value="permanent">Dauerhaft</label>
 </fieldset>
 <button id="send">Verschlüsseln</button>
+<section id="totp" hidden>
+  <p>Diese Seite erzeugt das Geheimnis für deine Authenticator-App auf diesem Gerät. Es verlässt die Seite nur verschlüsselt, an den Bot.</p>
+  <button id="totpMake">Geheimnis erzeugen</button>
+  <div id="totpShown" hidden>
+    <p>Trage es in deine Authenticator-App ein (Schlüssel eingeben) oder öffne den Link. Erst danach sendest du es an den Bot.</p>
+    <input id="totpSecret" type="text" readonly>
+    <p><a id="totpLink" href="#">In der Authenticator-App öffnen</a></p>
+    <button id="totpSend">Eingetragen: verschlüsselt an den Bot senden</button>
+  </div>
+</section>
 <p id="status"></p>
 <textarea id="result" readonly hidden></textarea>
 <button id="copy" hidden>Kopieren</button>
@@ -82,6 +92,24 @@ function answerOf(request, sealed) {
 // Telegram takes 4096 bytes at most through sendData.
 function fitsTelegram(text) {
   return new TextEncoder().encode(text).length <= 4096;
+}
+// The secret of the authenticator app (T359): 20 random bytes as base32 (RFC 4648, no padding), the same text as TotpApi.generateSecret of the bot, and the address that opens the app with it.
+function base32(bytes) {
+  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZ234567";
+  let bits = 0, value = 0, text = "";
+  for (const byte of bytes) {
+    value = ((value << 8) | byte) & 0xffff;
+    bits += 8;
+    while (bits >= 5) { text += alphabet[(value >>> (bits - 5)) & 31]; bits -= 5; }
+  }
+  if (bits > 0) text += alphabet[(value << (5 - bits)) & 31];
+  return text;
+}
+function newTotpSecret() {
+  return base32(crypto.getRandomValues(new Uint8Array(20)));
+}
+function totpUri(secret) {
+  return "otpauth://totp/AppGates%20bot:Owner?secret=" + secret + "&issuer=AppGates%20bot&algorithm=SHA1&digits=6&period=30";
 }
 // Layout of the result: RSA-OAEP(SHA-256) wrapped AES key | 12 byte IV | AES-GCM(JSON {n: name, v: value, t: time, h?: hint, k?: place}); base64url.
 async function seal(publicKey, name, value, now, extra) {
@@ -163,6 +191,39 @@ element("send").addEventListener("click", async () => {
     say("Verschlüsseln fehlgeschlagen: " + error.message, "bad");
   }
 });
+// The setup of the authenticator (T359, `?m=totp`): no value to type. The page makes the secret, shows it for the app, and seals it for the bot only when the person says it is entered; the name is reserved.
+if (new URLSearchParams(location.search).get("m") === "totp") {
+  for (const id of ["value", "send", "nameInput", "hint", "places"]) element(id).hidden = true;
+  element("totp").hidden = false;
+  let secret = "";
+  element("totpMake").addEventListener("click", () => {
+    secret = newTotpSecret();
+    element("totpSecret").value = secret;
+    element("totpLink").href = totpUri(secret);
+    element("totpShown").hidden = false;
+    element("totpMake").hidden = true;
+  });
+  element("totpSend").addEventListener("click", async () => {
+    if (!secret || !config.key) return say("Es gibt noch kein Geheimnis oder keinen Schlüssel.", "bad");
+    try {
+      const sealed = await seal(config.key, "TOTP_SETUP", secret, Date.now(), {});
+      if (inTelegram && window.Telegram && window.Telegram.WebApp) {
+        const data = answerOf(config.request, sealed);
+        if (!fitsTelegram(data)) return say("Zu lang für Telegram (höchstens 4096 Bytes).", "bad");
+        element("totpSecret").value = "";
+        secret = "";
+        window.Telegram.WebApp.sendData(data);
+        return say("Gesendet. Schicke dem Bot jetzt den Code deiner App.", "ok");
+      }
+      element("result").value = "/setenv TOTP_SETUP enc:" + sealed;
+      element("result").hidden = false;
+      element("copy").hidden = false;
+      say("Kopiere den Text und sende ihn an den Bot, danach den Code deiner App.", "ok");
+    } catch (error) {
+      say("Verschlüsseln fehlgeschlagen: " + error.message, "bad");
+    }
+  });
+}
 element("copy").addEventListener("click", async () => {
   element("result").select();
   try { await navigator.clipboard.writeText(element("result").value); say("Kopiert.", "ok"); } catch { document.execCommand("copy"); say("Kopiert.", "ok"); }
