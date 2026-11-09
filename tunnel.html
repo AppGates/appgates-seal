@@ -101,6 +101,32 @@ async function show(session) {
   say("Verbunden, nur dieses Gerät.");
 }
 
+// While the page is open it says every 30 seconds that it is, so that the bot does not end the tunnel (T361); the gate answers only for a valid session. A session lasts ten minutes, so a refused
+// signal first proves the key again for a new one. When that fails too, or the tunnel does not answer, the person is told and the signals stop.
+const HEARTBEAT_MS = 30_000;
+let heartbeat;
+function keepAlive(pair, first) {
+  let session = first;
+  const signal = () => call("/__device/alive", { headers: { "x-device-session": session } });
+  clearInterval(heartbeat);
+  heartbeat = setInterval(async () => {
+    try {
+      let answer = await signal();
+      if (answer.status === 401) {
+        const renewed = await prove(pair);
+        if (renewed.session) {
+          session = renewed.session;
+          answer = await signal();
+        }
+      }
+      if (!answer.ok) throw new Error("answer " + answer.status);
+    } catch (error) {
+      clearInterval(heartbeat);
+      say("Der Tunnel ist beendet oder nicht erreichbar. Öffne ihn mit dem Knopf aus dem Chat neu.", true);
+    }
+  }, HEARTBEAT_MS);
+}
+
 function enrolForm() {
   const form = document.getElementById("enrol");
   form.hidden = false;
@@ -136,6 +162,7 @@ async function start() {
   const result = await prove(pair);
   if (result.refused) return result.enrol ? enrolForm() : say("Der PC kennt dieses Gerät nicht (ein anderes Gerät ist eingetragen).", true);
   await show(result.session);
+  keepAlive(pair, result.session);
 }
 
 start().catch((error) => say(`Fehler: ${error && error.message ? error.message : error}`, true));
