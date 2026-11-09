@@ -43,9 +43,17 @@ const status = document.getElementById("status");
 const say = (text, bad = false) => { status.textContent = text; status.className = bad ? "bad" : ""; };
 
 const fragment = new URLSearchParams(location.hash.slice(1));
-const tunnel = fragment.get("u");
-const token = fragment.get("t");
-// the token must not stay in the address bar or in the history of the browser
+let tunnel = fragment.get("u");
+let token = fragment.get("t");
+// the token must not stay in the address bar or in the history of the browser. For a reload it is kept for the life of this tab only (sessionStorage: gone when the tab is closed, never in the history);
+// the token alone gets nobody past the second line, the key of this device (owner 2026-11-09)
+try {
+  if (tunnel && token) sessionStorage.setItem("appgates-tunnel-link", JSON.stringify({ u: tunnel, t: token }));
+  else {
+    const kept = JSON.parse(sessionStorage.getItem("appgates-tunnel-link") || "null");
+    if (kept && typeof kept.u === "string" && typeof kept.t === "string") { tunnel = kept.u; token = kept.t; }
+  }
+} catch { /* no storage: the link works once, as before */ }
 history.replaceState(null, "", location.pathname);
 
 const insideTelegram = typeof window.TelegramWebviewProxy !== "undefined" || /Telegram/i.test(navigator.userAgent);
