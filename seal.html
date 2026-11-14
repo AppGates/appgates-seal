@@ -20,6 +20,11 @@
   legend { color: var(--muted); padding: 0 4px; }
   label { display: block; margin: 6px 0; }
   input[type=radio] { width: auto; margin: 0 8px 0 0; }
+  .field { position: relative; }
+  .field input { padding-right: 3rem; }
+  .field button.reveal { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 2.4rem; height: 2.4rem; margin: 0; padding: 6px; background: none; color: var(--muted); border-radius: 8px; }
+  .field button.reveal:focus-visible { outline: 2px solid var(--accent); }
+  .reveal svg { display: block; width: 1.3rem; height: 1.3rem; margin: auto; }
 </style>
 </head>
 <body>
@@ -28,7 +33,13 @@
 <p>Name: <code id="name">-</code> · Schlüssel-Fingerabdruck: <code id="fingerprint">-</code></p>
 <p>Vergleiche den Fingerabdruck mit dem in der Nachricht des Bots. Der Wert wird in diesem Browser verschlüsselt und verlässt ihn nur verschlüsselt.</p>
 <input id="nameInput" type="text" autocomplete="off" autocapitalize="characters" placeholder="Name, z. B. MAIL_PASSWORD" hidden>
-<input id="value" type="password" autocomplete="off" placeholder="Wert">
+<div class="field">
+  <input id="value" type="password" autocomplete="off" placeholder="Wert">
+  <button id="reveal" class="reveal" type="button" aria-pressed="false" aria-label="Wert anzeigen" title="Wert anzeigen">
+    <svg id="eyeOn" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7S1 12 1 12z"/><circle cx="12" cy="12" r="3"/></svg>
+    <svg id="eyeOff" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true" hidden><path d="M17.94 17.94A10.94 10.94 0 0 1 12 19c-7 0-11-7-11-7a19.8 19.8 0 0 1 5.06-5.94"/><path d="M9.9 4.24A10.9 10.9 0 0 1 12 5c7 0 11 7 11 7a19.7 19.7 0 0 1-3.17 4.19"/><path d="M14.12 14.12A3 3 0 1 1 9.88 9.88"/><line x1="1" y1="1" x2="23" y2="23"/></svg>
+  </button>
+</div>
 <input id="hint" type="text" autocomplete="off" placeholder="Hinweis (freiwillig, nie der Wert selbst)" hidden>
 <fieldset id="places" hidden>
   <legend>Wo darf der Wert bleiben?</legend>
@@ -137,7 +148,7 @@ const config = (() => {
   const query = new URLSearchParams(location.search);
   const embedded = document.getElementById("config");
   const file = embedded && embedded.textContent.trim() ? JSON.parse(embedded.textContent) : {};
-  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "", request: query.get("r") || "", purpose: query.get("p") || "", places: offeredPlaces(query.get("o")) };
+  return { name: normalizeName(query.get("n") || file.n || ""), key: query.get("k") || file.k || "", request: query.get("r") || "", purpose: query.get("p") || "", places: offeredPlaces(query.get("o")), visible: query.get("v") === "1" };
 })();
 const element = (id) => document.getElementById(id);
 const say = (text, kind) => { element("status").textContent = text; element("status").className = kind || ""; };
@@ -154,6 +165,22 @@ if (config.places.length > 0) {
   element("places").hidden = false;
   element("hint").hidden = false;
   for (const place of config.places) element(place === "session" ? "placeSession" : "placePermanent").hidden = false;
+}
+// a value that is no secret (v=1: a path, a host name, a hint) is typed in plain text; a hidden one has an eye that shows it, and it is hidden again when the page goes to the background
+const setRevealed = (shown) => {
+  element("value").type = shown ? "text" : "password";
+  element("reveal").setAttribute("aria-pressed", String(shown));
+  element("reveal").setAttribute("aria-label", shown ? "Wert verbergen" : "Wert anzeigen");
+  element("reveal").title = shown ? "Wert verbergen" : "Wert anzeigen";
+  element("eyeOn").hidden = shown;
+  element("eyeOff").hidden = !shown;
+};
+if (config.visible) {
+  element("value").type = "text";
+  element("reveal").hidden = true;
+} else {
+  element("reveal").addEventListener("click", () => setRevealed(element("value").type === "password"));
+  document.addEventListener("visibilitychange", () => { if (document.hidden) setRevealed(false); });
 }
 if (config.key) fingerprint(config.key).then((value) => { element("fingerprint").textContent = value; }, () => say("Der Schlüssel im Link ist ungültig.", "bad"));
 else say("Der Link enthält keinen Schlüssel: öffne ihn noch einmal aus der Nachricht des Bots.", "bad");
@@ -185,10 +212,12 @@ element("send").addEventListener("click", async () => {
       if (!fitsTelegram(data)) return say("Zu lang für Telegram (höchstens 4096 Bytes): kürze den Wert oder den Hinweis.", "bad");
       element("value").value = "";
       element("hint").value = "";
+      if (!config.visible) setRevealed(false);
       window.Telegram.WebApp.sendData(data);
       return say("Gesendet.", "ok");
     }
     element("value").value = "";
+    if (!config.visible) setRevealed(false);
     element("result").value = "/setenv " + name + " enc:" + sealed;
     element("result").hidden = false;
     element("copy").hidden = false;
@@ -199,7 +228,7 @@ element("send").addEventListener("click", async () => {
 });
 // The setup of the authenticator (T359, `?m=totp`): no value to type. The page makes the secret, shows it for the app, and seals it for the bot only when the person says it is entered; the name is reserved.
 if (new URLSearchParams(location.search).get("m") === "totp") {
-  for (const id of ["value", "send", "nameInput", "hint", "places"]) element(id).hidden = true;
+  for (const id of ["value", "reveal", "send", "nameInput", "hint", "places"]) element(id).hidden = true;
   const hosted = insideTelegram(location.hash, navigator.userAgent, typeof window.TelegramWebviewProxy !== "undefined");
   // inside Telegram nothing is made and nothing is shown: the person is told to open the link in the browser of the phone
   if (hosted) say("Diese Seite ist in Telegram geöffnet. Öffne den Link im Browser deines Handys (in Telegram die Einstellung, Links extern zu öffnen). Hier erzeuge ich kein Geheimnis.", "bad");
