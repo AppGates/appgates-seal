@@ -25,6 +25,7 @@
   .field button.reveal { position: absolute; right: 4px; top: 50%; transform: translateY(-50%); width: 2.4rem; height: 2.4rem; margin: 0; padding: 6px; background: none; color: var(--muted); border-radius: 8px; }
   .field button.reveal:focus-visible { outline: 2px solid var(--accent); }
   .reveal svg { display: block; width: 1.3rem; height: 1.3rem; margin: auto; }
+  .reveal svg[hidden] { display: none; }
 </style>
 </head>
 <body>
@@ -172,8 +173,9 @@ const setRevealed = (shown) => {
   element("reveal").setAttribute("aria-pressed", String(shown));
   element("reveal").setAttribute("aria-label", shown ? "Wert verbergen" : "Wert anzeigen");
   element("reveal").title = shown ? "Wert verbergen" : "Wert anzeigen";
-  element("eyeOn").hidden = shown;
-  element("eyeOff").hidden = !shown;
+  // the attribute, not the property: an SVG element has no `hidden` property
+  element("eyeOn").toggleAttribute("hidden", shown);
+  element("eyeOff").toggleAttribute("hidden", !shown);
 };
 if (config.visible) {
   element("value").type = "text";
