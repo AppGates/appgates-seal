@@ -1025,6 +1025,14 @@ html.ui-dragging, html.ui-dragging * {
   font-family: var(--ui-font);
 }
 
+.ui-media-keys__status--error {
+  color: var(--ui-color-bad);
+}
+
+.ui-media-keys__last {
+  font-weight: 700;
+}
+
 /* ../../frontend/web/packages/formpage/src/theme.css */
 :root[data-telegram-theme] {
   --ui-color-page: var(--tg-theme-bg-color);
