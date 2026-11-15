@@ -1,0 +1,410 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src https://*.devtunnels.ms; media-src blob:; base-uri 'none'; form-action 'none'">
+<title>Sprachmodus</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1b1f24; --bg: #ffffff; --muted: #57606a; --line: #d0d7de; --accent: #0969da; --bad: #cf222e; --rec: #c0392b; --box: #eef2f7; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #e6edf3; --bg: #0d1117; --muted: #9da7b3; --line: #30363d; --accent: #4493f8; --bad: #f85149; --rec: #e5534b; --box: #161b22; } }
+  body { margin: 0; padding: 16px; font: 18px/1.45 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  h1 { font-size: 20px; margin: 0 0 12px; }
+  p { margin: 8px 0; }
+  .muted { color: var(--muted); font-size: 14px; }
+  .bad { color: var(--bad); }
+  label { display: block; margin: 12px 0 4px; }
+  input { width: 100%; box-sizing: border-box; padding: 10px; font: inherit; border: 1px solid var(--line); border-radius: 6px; background: transparent; color: inherit; }
+  button { font: inherit; padding: 16px 20px; border: 0; border-radius: 12px; background: var(--accent); color: #fff; width: 100%; margin-top: 12px; }
+  button.secondary { background: var(--box); color: var(--fg); border: 1px solid var(--line); }
+  #state { margin: 16px 0; padding: 20px; border-radius: 12px; background: var(--box); font-size: 24px; font-weight: 600; text-align: center; }
+  #state.recording { background: var(--rec); color: #fff; }
+  #row { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+  #log { margin-top: 16px; }
+  .line { padding: 8px 12px; margin: 6px 0; border-radius: 10px; background: var(--box); white-space: pre-wrap; overflow-wrap: anywhere; }
+  .line.note { color: var(--muted); font-size: 15px; background: transparent; padding: 2px 12px; }
+  .line.you { border-left: 4px solid var(--accent); }
+  .line.error { color: var(--bad); }
+  [hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<h1>Sprachmodus</h1>
+<p id="status">Einen Moment …</p>
+<form id="enrol" hidden>
+  <p>Dieses Gerät ist noch nicht eingetragen. Ein Schlüssel wird nur auf diesem Gerät angelegt und verlässt es nie.</p>
+  <label for="code">Code aus deiner Authenticator-App</label>
+  <input id="code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{6}" maxlength="6" required>
+  <label for="token">Einmal-Token vom PC <span class="muted">(nur für ein weiteres oder neues Gerät, sonst leer lassen)</span></label>
+  <input id="token" autocomplete="off">
+  <button type="submit">Eintragen</button>
+</form>
+<div id="app" hidden>
+  <button id="start">Start</button>
+  <div id="state" hidden>Bereit</div>
+  <div id="controls" hidden>
+    <button id="record">Aufnahme an / aus</button>
+    <div id="row">
+      <button id="stop" class="secondary">Sprechen stoppen</button>
+      <button id="again" class="secondary">Nochmal hören</button>
+    </div>
+    <p class="muted">Medientaste (Lenkrad, Headset): Play oder Pause schaltet das Mikrofon an (1 Piep) und aus (2 Pieps, die Aufnahme geht an den Bot). Weiter: Sprechen stoppen. Zurück: letzte Antwort nochmal.</p>
+  </div>
+  <div id="log"></div>
+</div>
+<script>
+"use strict";
+// The page of the voice mode (T391). The device is proven as on the page of the tunnel (T354): the token of the tunnel service in the part after "#" (never sent to GitHub) and a key of this device that
+// cannot be exported, which signs the challenge of the machine; only then is there a session, and every request carries it. The page speaks only to the bot of the owner, through the tunnel and the gate:
+// it sends recordings (POST /voice/say) and asks for what the bot said (GET /voice/events, woken by the gate's request for changes). Nothing the bot says is put into the page as HTML (text only).
+//
+// One sound element carries everything that is heard: a silent loop (so that the phone keeps the media controls and gives the keys to the page), the beeps and the answers one after the other. The
+// microphone is opened ONCE at the tap on Start and then only switched by its tracks (measured on 2026-11-15: a hidden page is refused a new microphone, and one opened afresh delivered silence).
+const PURPOSE = "appgates-device-proof-v1";
+const status = document.getElementById("status");
+const say = (text, bad = false) => { status.textContent = text; status.className = bad ? "bad" : ""; };
+
+const fragment = new URLSearchParams(location.hash.slice(1));
+let tunnel = fragment.get("u");
+let token = fragment.get("t");
+// the token must not stay in the address bar or in the history; for a reload it is kept for the life of this tab only (sessionStorage), and it alone gets nobody past the key of this device
+try {
+  if (tunnel && token) sessionStorage.setItem("appgates-tunnel-link", JSON.stringify({ u: tunnel, t: token }));
+  else {
+    const kept = JSON.parse(sessionStorage.getItem("appgates-tunnel-link") || "null");
+    if (kept && typeof kept.u === "string" && typeof kept.t === "string") { tunnel = kept.u; token = kept.t; }
+  }
+} catch { /* no storage: the link works once */ }
+history.replaceState(null, "", location.pathname);
+
+const insideTelegram = typeof window.TelegramWebviewProxy !== "undefined" || /Telegram/i.test(navigator.userAgent);
+
+function database() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open("appgates-device", 1);
+    request.onupgradeneeded = () => request.result.createObjectStore("keys");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+async function stored(write) {
+  const db = await database();
+  return new Promise((resolve, reject) => {
+    const transaction = db.transaction("keys", write === undefined ? "readonly" : "readwrite");
+    const keys = transaction.objectStore("keys");
+    const request = write === undefined ? keys.get("device") : keys.put(write, "device");
+    request.onsuccess = () => resolve(request.result);
+    request.onerror = () => reject(request.error);
+  });
+}
+
+async function call(path, init = {}) {
+  const headers = { "x-tunnel-authorization": `tunnel ${token}`, ...(init.headers || {}) };
+  return fetch(`${tunnel}${path}`, { ...init, headers, credentials: "omit", cache: "no-store", redirect: "error" });
+}
+
+async function prove(pair) {
+  const challenge = await (await call("/__device/challenge")).json();
+  const signature = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, pair.privateKey, new TextEncoder().encode(`${PURPOSE}:${challenge.nonce}`)));
+  const base64url = btoa(String.fromCharCode(...signature)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  const answer = await call("/__device/prove", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ challengeId: challenge.id, signature: base64url }) });
+  if (answer.status === 403) return { refused: true, enrol: (await answer.json()).enrol === true };
+  if (!answer.ok) throw new Error(`Der PC hat den Nachweis mit ${answer.status} beantwortet.`);
+  return { session: (await answer.json()).token };
+}
+
+// The proven device and its session (ten minutes): a request that is refused (401) proves the key again and is repeated once.
+let device;
+async function authed(path, init = {}) {
+  const attempt = () => call(path, { ...init, headers: { ...(init.headers || {}), "x-device-session": device.session } });
+  let answer = await attempt();
+  if (answer.status === 401) {
+    const renewed = await prove(device.pair);
+    if (renewed.session) {
+      device.session = renewed.session;
+      answer = await attempt();
+    }
+  }
+  return answer;
+}
+
+function enrolForm() {
+  const form = document.getElementById("enrol");
+  form.hidden = false;
+  say("Gerät eintragen");
+  form.onsubmit = async (event) => {
+    event.preventDefault();
+    const code = document.getElementById("code").value.trim();
+    const enrolmentToken = document.getElementById("token").value.trim();
+    try {
+      const pair = await crypto.subtle.generateKey({ name: "ECDSA", namedCurve: "P-256" }, false, ["sign", "verify"]);
+      const jwk = await crypto.subtle.exportKey("jwk", pair.publicKey);
+      const key = { kty: "EC", crv: "P-256", x: jwk.x, y: jwk.y };
+      const answer = await call("/__device/enrol", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ key, code, ...(enrolmentToken ? { enrolmentToken } : {}) }) });
+      if (!answer.ok) {
+        say(answer.status === 403 ? "Nicht eingetragen: der Code stimmt nicht, oder für dieses Konto gibt es schon ein Gerät (dann nur mit einem Einmal-Token vom PC)." : `Nicht eingetragen (Antwort ${answer.status}).`, true);
+        return;
+      }
+      await stored(pair);
+      form.hidden = true;
+      await begin();
+    } catch (error) {
+      say(`Fehler beim Eintragen: ${error && error.message ? error.message : error}`, true);
+    }
+  };
+}
+
+// ---- the sounds: one element for everything that is heard -------------------------------------------------------------------------------------------------------------------------------------------
+
+const player = new Audio();
+const RATE = 16000;
+// a WAV of 16 bit mono from a list of [frequency, milliseconds] (a frequency of 0 is silence)
+function wav(parts) {
+  const samples = parts.reduce((sum, [, ms]) => sum + Math.round(RATE * ms / 1000), 0);
+  const buffer = new ArrayBuffer(44 + samples * 2), view = new DataView(buffer);
+  const text = (offset, value) => [...value].forEach((character, index) => view.setUint8(offset + index, character.charCodeAt(0)));
+  text(0, "RIFF"); view.setUint32(4, 36 + samples * 2, true); text(8, "WAVEfmt "); view.setUint32(16, 16, true); view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true); view.setUint32(24, RATE, true); view.setUint32(28, RATE * 2, true); view.setUint16(32, 2, true); view.setUint16(34, 16, true);
+  text(36, "data"); view.setUint32(40, samples * 2, true);
+  let at = 44;
+  for (const [frequency, ms] of parts) {
+    const count = Math.round(RATE * ms / 1000);
+    for (let index = 0; index < count; index++) {
+      view.setInt16(at, frequency === 0 ? 0 : Math.round(Math.sin(2 * Math.PI * frequency * index / RATE) * 0.35 * 32767), true);
+      at += 2;
+    }
+  }
+  return URL.createObjectURL(new Blob([buffer], { type: "audio/wav" }));
+}
+let sounds;
+function makeSounds() {
+  const beeps = (times, frequency) => wav(Array.from({ length: times }, (_, index) => [[frequency, 150], [0, index === times - 1 ? 0 : 100]]).flat());
+  // 30 seconds of silence: a browser shows its media controls only for media that is long enough (5 seconds did not)
+  sounds = { silence: wav([[0, 30000]]), on: beeps(1, 880), off: beeps(2, 440), lost: beeps(3, 200) };
+}
+
+// What is waiting to be heard (the answers), in order. A beep or an answer interrupts the silent loop; when nothing is left the silence comes back.
+let playlist = [];
+let lastAnswer = [];     // the pieces of the last answer, for "Nochmal hören"
+let playingAnswer = false;
+function idle() {
+  playingAnswer = false;
+  player.loop = true;
+  player.src = sounds.silence;
+  player.play().catch(() => {});
+  render();
+}
+function playNext() {
+  const next = playlist.shift();
+  if (next === undefined) return idle();
+  playingAnswer = true;
+  player.loop = false;
+  player.src = next;
+  player.play().catch(() => idle());
+  render();
+}
+player.addEventListener("ended", () => { if (playingAnswer) playNext(); else idle(); });
+function beep(kind) {
+  playlist = [];
+  playingAnswer = false;
+  player.loop = false;
+  player.src = sounds[kind];
+  player.play().catch(() => {});
+  // after the beep the silence is back (the element ends; "ended" calls idle)
+}
+function stopSpeaking() {
+  playlist = [];
+  if (playingAnswer) idle();
+}
+function hearAgain() {
+  if (lastAnswer.length === 0) return;
+  playlist = lastAnswer.slice();
+  playNext();
+}
+function enqueueAnswer(url) {
+  // the first piece of a new answer starts a new "last answer" when nothing is being spoken
+  if (!playingAnswer && playlist.length === 0) { lastAnswer.forEach((old) => URL.revokeObjectURL(old)); lastAnswer = []; }
+  lastAnswer.push(url);
+  playlist.push(url);
+  if (!playingAnswer) playNext();
+}
+
+// ---- the microphone: opened once, switched by its tracks --------------------------------------------------------------------------------------------------------------------------------------------
+
+let stream, recorder, chunks = [], started = false;
+const microphoneTracks = () => (stream ? stream.getAudioTracks() : []);
+async function openMicrophone() {
+  if (!window.isSecureContext || !navigator.mediaDevices) { line("Das Mikrofon geht nur auf einer sicheren Seite (https).", "error"); return false; }
+  try { stream = await navigator.mediaDevices.getUserMedia({ audio: true }); }
+  catch (error) { line(`Mikrofon abgelehnt: ${error}`, "error"); return false; }
+  stream.getAudioTracks().forEach((track) => {
+    track.enabled = false;
+    track.onended = () => { state("Mikrofon verloren: hole die Seite nach vorn."); };
+  });
+  return true;
+}
+let wake;
+async function keepScreenOn() {
+  if (!("wakeLock" in navigator)) return;
+  try { wake = await navigator.wakeLock.request("screen"); } catch { /* a phone that refuses: the page works, only the locked screen may not */ }
+}
+document.addEventListener("visibilitychange", async () => {
+  if (document.visibilityState !== "visible" || !started) return;
+  keepScreenOn();
+  // only a microphone that has ended is opened again; a live one is never touched (opening it afresh made it worse)
+  if (!microphoneTracks().some((track) => track.readyState === "live") && (!recorder || recorder.state !== "recording")) {
+    if (await openMicrophone()) state("Mikrofon neu geöffnet. Bereit.");
+  }
+});
+
+async function toggleRecording() {
+  if (recorder && recorder.state === "recording") { recorder.stop(); return; }
+  if (!microphoneTracks().some((track) => track.readyState === "live")) {
+    if (document.visibilityState !== "visible") { beep("lost"); state("Mikrofon verloren: hole die Seite nach vorn."); return; }
+    if (!(await openMicrophone())) return;
+  }
+  stopSpeaking(); // the owner speaks: the bot's voice stops
+  microphoneTracks().forEach((track) => { track.enabled = true; });
+  chunks = [];
+  const type = ["audio/webm;codecs=opus", "audio/webm", "audio/mp4"].find((candidate) => MediaRecorder.isTypeSupported(candidate));
+  recorder = type === undefined ? new MediaRecorder(stream) : new MediaRecorder(stream, { mimeType: type });
+  recorder.ondataavailable = (event) => chunks.push(event.data);
+  recorder.onstop = async () => {
+    microphoneTracks().forEach((track) => { track.enabled = false; });
+    beep("off");
+    const mime = (recorder.mimeType || "audio/webm").split(";")[0];
+    const blob = new Blob(chunks, { type: mime });
+    state("Sende …");
+    try {
+      const answer = await authed("/voice/say", { method: "POST", headers: { "content-type": mime }, body: blob });
+      if (answer.status !== 202) throw new Error(`Antwort ${answer.status}`);
+      state("Der Bot arbeitet …");
+    } catch (error) {
+      line(`Senden fehlgeschlagen: ${error && error.message ? error.message : error}`, "error");
+      state("Bereit");
+    }
+  };
+  recorder.start();
+  beep("on");
+  state("AUFNAHME", true);
+}
+
+// ---- what is shown ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+const log = document.getElementById("log");
+const shown = new Map(); // message id of the bot -> its line, so that an edit changes the line
+function line(text, kind) {
+  const element = document.createElement("div");
+  element.className = "line" + (kind ? " " + kind : "");
+  element.textContent = text; // text only: nothing the bot says is markup
+  log.insertBefore(element, log.firstChild);
+  while (log.childNodes.length > 40) log.removeChild(log.lastChild);
+  return element;
+}
+const stateElement = document.getElementById("state");
+function state(text, recording = false) {
+  stateElement.textContent = text;
+  stateElement.className = recording ? "recording" : "";
+}
+function render() {
+  // only the idle state is rewritten by the sounds, never while a recording runs or something is being sent
+  if (recorder && recorder.state === "recording") return;
+  if (playingAnswer) state("Der Bot spricht …");
+  else if (stateElement.textContent === "Der Bot spricht …") state("Bereit");
+}
+
+async function handleEvent(event) {
+  if (event.kind === "text" && event.text) shown.set(event.messageId, line(event.text));
+  else if (event.kind === "edit") { const element = shown.get(event.messageId); if (element) element.textContent = event.text; else shown.set(event.messageId, line(event.text)); }
+  else if (event.kind === "delete") { const element = shown.get(event.messageId); if (element) { element.remove(); shown.delete(event.messageId); } }
+  else if (event.kind === "note") line(event.text, "note");
+  else if (event.kind === "error") { line(event.text, "error"); beep("lost"); state("Bereit"); }
+  else if (event.kind === "audio") {
+    if (event.text) shown.set(event.messageId, line(event.text));
+    const answer = await authed(event.audio);
+    if (!answer.ok) throw new Error(`Die Antwort konnte nicht geholt werden (${answer.status}).`);
+    enqueueAnswer(URL.createObjectURL(new Blob([await answer.arrayBuffer()], { type: answer.headers.get("content-type") || "audio/ogg" })));
+  }
+}
+
+let seq = 0;
+async function pull() {
+  const answer = await authed(`/voice/events?since=${seq}`);
+  if (!answer.ok) throw new Error("answer " + answer.status);
+  for (const event of (await answer.json()).events) {
+    await handleEvent(event);
+    seq = Math.max(seq, event.seq);
+  }
+}
+
+// The gate holds a request for changes until the channel says that there is something new (at most 25 seconds): then the events are asked for. Every answer of the gate is followed by a look at the
+// events (so that nothing that came between two requests is lost); while nothing changes there is one short request every 25 seconds.
+let version = null, stopped = false;
+async function watch() {
+  while (!stopped) {
+    const answer = await authed(version === null ? "/__device/changes" : `/__device/changes?since=${version}`);
+    if (!answer.ok) throw new Error("answer " + answer.status);
+    version = (await answer.json()).version;
+    await pull();
+  }
+}
+function stopAll() {
+  stopped = true;
+  clearInterval(heartbeat);
+  say("Der Sprachmodus ist beendet oder nicht erreichbar. Starte ihn im Chat neu.", true);
+  state("Beendet");
+}
+let heartbeat;
+
+// ---- start ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+
+async function begin() {
+  if (!tunnel || !token || !/^https:\/\/[a-z0-9-]+(\.[a-z0-9-]+)*\.devtunnels\.ms(:\d+)?$/i.test(tunnel)) return say("Dieser Link ist unvollständig. Öffne ihn mit dem Knopf aus dem Chat des Bots.", true);
+  if (insideTelegram) return say("Diese Seite ist in Telegram geöffnet. Öffne sie im Browser deines Handys (in Telegram den In-App-Browser ausschalten oder im Menü „Im Browser öffnen“).", true);
+  const pair = await stored();
+  if (!pair) return enrolForm();
+  const result = await prove(pair);
+  if (result.refused) return result.enrol ? enrolForm() : say("Der PC kennt dieses Gerät nicht (ein anderes Gerät ist eingetragen).", true);
+  device = { pair, session: result.session };
+  say("Verbunden, nur dieses Gerät.");
+  document.getElementById("app").hidden = false;
+}
+
+// The tap on Start does what only a tap may: opens the microphone, starts the sound, takes the media keys.
+document.getElementById("start").addEventListener("click", async () => {
+  if (started) return;
+  started = true;
+  document.getElementById("start").hidden = true;
+  makeSounds();
+  idle();
+  if ("mediaSession" in navigator) {
+    navigator.mediaSession.metadata = new MediaMetadata({ title: "Sprachmodus", artist: "Bot" });
+    navigator.mediaSession.playbackState = "playing";
+    const actions = {
+      play: toggleRecording, pause: toggleRecording,
+      nexttrack: stopSpeaking, previoustrack: hearAgain,
+    };
+    for (const [action, handler] of Object.entries(actions)) {
+      try { navigator.mediaSession.setActionHandler(action, () => { handler(); if (player.paused) player.play().catch(() => {}); navigator.mediaSession.playbackState = "playing"; }); }
+      catch { /* a key that this browser does not know: the buttons on the page do the same */ }
+    }
+  }
+  document.getElementById("controls").hidden = false;
+  stateElement.hidden = false;
+  if (!(await openMicrophone())) { state("Kein Mikrofon"); return; }
+  await keepScreenOn();
+  state("Bereit");
+  heartbeat = setInterval(async () => {
+    try { const answer = await authed("/__device/alive"); if (!answer.ok) throw new Error("answer " + answer.status); } catch { stopAll(); }
+  }, 30_000);
+  watch().catch(() => stopAll());
+});
+document.getElementById("record").addEventListener("click", toggleRecording);
+document.getElementById("stop").addEventListener("click", stopSpeaking);
+document.getElementById("again").addEventListener("click", hearAgain);
+
+begin().catch((error) => say(`Fehler: ${error && error.message ? error.message : error}`, true));
+</script>
+</body>
+</html>
