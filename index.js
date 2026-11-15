@@ -3793,6 +3793,51 @@ class MasterDetailViewModel extends WebViewModel {
   detail = undefined;
   placeholder = undefined;
 }
+// ../../frontend/web/packages/ui/src/viewModels/MediaKeysViewModel.ts
+class MediaKeysViewModel extends WebViewModel {
+  _source;
+  idleText = "";
+  listeningText = "";
+  lastAction = undefined;
+  unsupportedActions = [];
+  errorText = "";
+  isListening = false;
+  onAction = () => {
+    return;
+  };
+  startButton;
+  constructor(_source) {
+    super();
+    this._source = _source;
+    this.startButton = new ButtonViewModel(() => this.start(), { variant: "primary" });
+  }
+  get statusText() {
+    if (this.errorText !== "")
+      return this.errorText;
+    return this.isListening ? this.listeningText : this.idleText;
+  }
+  async start() {
+    this.errorText = "";
+    try {
+      const registration = await this._source.start((action) => this._press(action));
+      this.unsupportedActions = registration.unsupported;
+      this.isListening = true;
+    } catch (error) {
+      this.errorText = error instanceof Error ? error.message : String(error);
+      this.isListening = false;
+    }
+    this.startButton.isEnabled = !this.isListening;
+  }
+  stop() {
+    this._source.stop();
+    this.isListening = false;
+    this.startButton.isEnabled = true;
+  }
+  _press(action) {
+    this.lastAction = action;
+    this.onAction(action);
+  }
+}
 // ../../frontend/web/packages/ui/src/viewModels/ProgressBarViewModel.ts
 class ProgressBarViewModel extends WebViewModel {
   done = 0;
@@ -6284,14 +6329,54 @@ function MasterDetailView(props) {
   });
 }
 
+// ../../frontend/web/packages/ui/src/views/MediaKeysView.tsx
+var _tmpl$55 = /* @__PURE__ */ template(`<div><div role=status>`);
+var _tmpl$219 = /* @__PURE__ */ template(`<div class=ui-media-keys__last>`);
+var MediaKeysView = mvvm.createMvvmView((view) => createComponent(Show, {
+  get when() {
+    return view.bind((v) => v.isVisible);
+  },
+  get children() {
+    var _el$ = _tmpl$55(), _el$2 = _el$.firstChild;
+    insert(_el$, createComponent(ButtonView, {
+      get model() {
+        return view.viewModel.startButton;
+      }
+    }), _el$2);
+    insert(_el$2, () => view.bind((v) => v.statusText));
+    insert(_el$, createComponent(Show, {
+      get when() {
+        return view.bind((v) => v.lastAction);
+      },
+      children: (action) => (() => {
+        var _el$3 = _tmpl$219();
+        insert(_el$3, action);
+        return _el$3;
+      })()
+    }), null);
+    createRenderEffect((_p$) => {
+      var _v$ = view.bind((v) => v.id) || undefined, _v$2 = view.bind((v) => ["ui-media-keys", ...v.classes].join(" ")), _v$3 = view.bind((v) => v.errorText === "" ? "ui-media-keys__status" : "ui-media-keys__status ui-media-keys__status--error");
+      _v$ !== _p$.e && setAttribute(_el$, "id", _p$.e = _v$);
+      _v$2 !== _p$.t && className(_el$, _p$.t = _v$2);
+      _v$3 !== _p$.a && className(_el$2, _p$.a = _v$3);
+      return _p$;
+    }, {
+      e: undefined,
+      t: undefined,
+      a: undefined
+    });
+    return _el$;
+  }
+}));
+
 // ../../frontend/web/packages/ui/src/views/ProgressBarView.tsx
-var _tmpl$55 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
+var _tmpl$56 = /* @__PURE__ */ template(`<div><div class=ui-progress__track role=progressbar aria-valuemin=0><span></span></div><span class=ui-progress__label>`);
 var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
   get when() {
     return view.bind((v) => v.isVisible);
   },
   get children() {
-    var _el$ = _tmpl$55(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
+    var _el$ = _tmpl$56(), _el$2 = _el$.firstChild, { firstChild: _el$3, nextSibling: _el$4 } = _el$2;
     insert(_el$4, () => view.bind((v) => v.label));
     createRenderEffect((_p$) => {
       var _v$ = view.bind((v) => ["ui-progress", ...v.classes].join(" ")), _v$2 = view.bind((v) => v.total), _v$3 = view.bind((v) => v.done), _v$4 = view.bind((v) => `ui-progress__fill ui-progress__fill--${v.effectiveTone}`), _v$5 = `${view.bind((v) => v.percent)}%`;
@@ -6313,9 +6398,9 @@ var ProgressBarView = mvvm.createMvvmView((view) => createComponent(Show, {
 }));
 
 // ../../frontend/web/packages/ui/src/views/ReorderControlsView.tsx
-var _tmpl$56 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
+var _tmpl$57 = /* @__PURE__ */ template(`<div class=ui-reorder-controls>`);
 var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$56();
+  var _el$ = _tmpl$57();
   insert(_el$, createComponent(ViewSelector, {
     get model() {
       return view.viewModel.layout;
@@ -6326,9 +6411,9 @@ var ReorderControlsView = mvvm.createMvvmView((view) => (() => {
 })());
 
 // ../../frontend/web/packages/ui/src/views/ReorderHandleView.tsx
-var _tmpl$57 = /* @__PURE__ */ template(`<button type=button>`);
+var _tmpl$58 = /* @__PURE__ */ template(`<button type=button>`);
 var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$57();
+  var _el$ = _tmpl$58();
   _el$.$$pointerdown = (event) => {
     if (event.button !== 0)
       return;
@@ -6352,11 +6437,11 @@ var ReorderHandleView = mvvm.createMvvmView((view) => (() => {
 delegateEvents(["pointerdown"]);
 
 // ../../frontend/web/packages/ui/src/views/SearchView.tsx
-var _tmpl$58 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
-var _tmpl$219 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
+var _tmpl$59 = /* @__PURE__ */ template(`<button type=button class=ui-search__clear>`);
+var _tmpl$220 = /* @__PURE__ */ template(`<p class=ui-search__hint>`);
 var _tmpl$313 = /* @__PURE__ */ template(`<div class=ui-search__dropdown><ul class=ui-search__results role=listbox>`);
 var _tmpl$412 = /* @__PURE__ */ template(`<div><div class=ui-search__field><input class=ui-search__input type=search role=combobox autocomplete=off>`);
-var _tmpl$59 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
+var _tmpl$510 = /* @__PURE__ */ template(`<span class=ui-search__meta>`);
 var _tmpl$64 = /* @__PURE__ */ template(`<li class=ui-search__result role=option><span class=ui-search__title>`);
 var _tmpl$73 = /* @__PURE__ */ template(`<mark>`);
 var SearchView = mvvm.createMvvmView((view) => {
@@ -6395,7 +6480,7 @@ var SearchView = mvvm.createMvvmView((view) => {
           return view.bind((v) => v.query !== "");
         },
         get children() {
-          var _el$4 = _tmpl$58();
+          var _el$4 = _tmpl$59();
           _el$4.$$click = () => view.viewModel.clear();
           insert(_el$4, createComponent(UiIcon, {
             name: "close"
@@ -6416,7 +6501,7 @@ var SearchView = mvvm.createMvvmView((view) => {
               return view.bind((v) => v.hint);
             },
             get children() {
-              var _el$6 = _tmpl$219();
+              var _el$6 = _tmpl$220();
               insert(_el$6, () => view.bind((v) => v.hint));
               return _el$6;
             }
@@ -6443,7 +6528,7 @@ var SearchView = mvvm.createMvvmView((view) => {
                   return row.meta;
                 },
                 get children() {
-                  var _el$0 = _tmpl$59();
+                  var _el$0 = _tmpl$510();
                   insert(_el$0, () => row.meta);
                   return _el$0;
                 }
@@ -6579,9 +6664,9 @@ var TextView = mvvm.createMvvmView((view) => createComponent(Show, {
 
 // ../../frontend/web/packages/ui/src/views/ToasterView.tsx
 var _tmpl$65 = /* @__PURE__ */ template(`<div class=ui-toast>`);
-var _tmpl$220 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
+var _tmpl$221 = /* @__PURE__ */ template(`<div class=ui-toast-region role=status aria-live=polite>`);
 var ToasterView = mvvm.createMvvmView((view) => (() => {
-  var _el$ = _tmpl$220();
+  var _el$ = _tmpl$221();
   insert(_el$, createComponent(Show, {
     get when() {
       return view.bind((v) => v.message);
@@ -6620,7 +6705,7 @@ class ViewRegistry {
 
 // ../../frontend/web/packages/ui/src/views/createUiViewRegistry.ts
 function createUiViewRegistry() {
-  return new ViewRegistry().register(ActionBarViewModel, ActionBarView).register(AppBarViewModel, AppBarView).register(ButtonViewModel, ButtonView).register(ConfirmSheetViewModel, ConfirmSheetView).register(DropdownFieldViewModel, DropdownFieldView).register(DynamicFormRowViewModel, DynamicFormRowView).register(DynamicFormViewModel, DynamicFormView).register(InfoFieldViewModel, InfoFieldView).register(SwitchFieldViewModel, SwitchFieldView).register(FormSheetViewModel, FormSheetView).register(FilePickerViewModel, FilePickerView).register(GridViewModel, GridView).register(HintViewModel, HintView).register(ImageViewModel, ImageView).register(PictureViewModel, PictureView).register(ListRowViewModel, ListRowView).register(ListViewModel, ListView).register(MasterDetailViewModel, MasterDetailView).register(ProgressBarViewModel, ProgressBarView).register(ReorderControlsViewModel, ReorderControlsView).register(ReorderHandleViewModel, ReorderHandleView).register(SearchViewModel, SearchView).register(StackViewModel, StackView).register(TextFieldViewModel, TextFieldView).register(TextViewModel, TextView).register(ToasterViewModel, ToasterView);
+  return new ViewRegistry().register(ActionBarViewModel, ActionBarView).register(AppBarViewModel, AppBarView).register(ButtonViewModel, ButtonView).register(ConfirmSheetViewModel, ConfirmSheetView).register(DropdownFieldViewModel, DropdownFieldView).register(DynamicFormRowViewModel, DynamicFormRowView).register(DynamicFormViewModel, DynamicFormView).register(InfoFieldViewModel, InfoFieldView).register(SwitchFieldViewModel, SwitchFieldView).register(FormSheetViewModel, FormSheetView).register(FilePickerViewModel, FilePickerView).register(GridViewModel, GridView).register(HintViewModel, HintView).register(ImageViewModel, ImageView).register(PictureViewModel, PictureView).register(ListRowViewModel, ListRowView).register(ListViewModel, ListView).register(MasterDetailViewModel, MasterDetailView).register(MediaKeysViewModel, MediaKeysView).register(ProgressBarViewModel, ProgressBarView).register(ReorderControlsViewModel, ReorderControlsView).register(ReorderHandleViewModel, ReorderHandleView).register(SearchViewModel, SearchView).register(StackViewModel, StackView).register(TextFieldViewModel, TextFieldView).register(TextViewModel, TextView).register(ToasterViewModel, ToasterView);
 }
 // ../../frontend/web/packages/formpage/resources/texts.de.json
 var texts_de_default = {
